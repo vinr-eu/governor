@@ -13,7 +13,12 @@ Commands:
     --profile <name>            Store under a named profile (default: "default")
     --list                      List profiles already connected for the provider
   serve                       Start the MCP endpoint
+    --host <addr>                Bind address (default: 127.0.0.1, loopback only)
+    --port <port>                Port to listen on (default: 8787)
     --profile is available per-request via /providers/aws/:profile/identity
+    Requires "Authorization: Bearer <token>" on /mcp and /providers/*.
+    Token comes from GOVERNOR_MCP_TOKEN, or is generated fresh each run
+    and printed once at startup.
 
 Options:
   -h, --help                  Show this help message
