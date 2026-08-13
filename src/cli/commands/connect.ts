@@ -6,7 +6,7 @@ import {
 } from "../../providers/registry";
 import { parseFlags, type ParsedArgs } from "../lib/flags";
 import { logger } from "../lib/logger";
-import { promptPassword } from "../lib/prompt";
+import { promptPassword, promptText } from "../lib/prompt";
 import { Vault, vaultExists } from "../lib/vault";
 
 export async function runConnect(argv: string[]) {
@@ -43,19 +43,35 @@ async function connectWithAccessKey(
   provider: ProviderDescriptor,
   flags: ParsedArgs["flags"],
 ) {
-  const accessKeyId = flags["access-key-id"];
-  const secretAccessKey = flags["secret-access-key"];
-
-  if (typeof accessKeyId !== "string" || typeof secretAccessKey !== "string") {
-    logger.error(
-      `Usage: governor connect ${provider.id} --access-key-id <id> --secret-access-key <secret>`,
-    );
+  if (!(await vaultExists())) {
+    logger.error("No vault found. Run `governor init` first.");
     process.exitCode = 1;
     return;
   }
 
-  if (!(await vaultExists())) {
-    logger.error("No vault found. Run `governor init` first.");
+  let accessKeyId = flags["access-key-id"];
+  let secretAccessKey = flags["secret-access-key"];
+
+  if (accessKeyId !== undefined && typeof accessKeyId !== "string") {
+    logger.error("--access-key-id requires a value.");
+    process.exitCode = 1;
+    return;
+  }
+  if (secretAccessKey !== undefined && typeof secretAccessKey !== "string") {
+    logger.error("--secret-access-key requires a value.");
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    if (accessKeyId === undefined) {
+      accessKeyId = await promptText("AWS Access Key ID:");
+    }
+    if (secretAccessKey === undefined) {
+      secretAccessKey = await promptPassword("AWS Secret Access Key:");
+    }
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
     return;
   }
