@@ -77,6 +77,12 @@ typings/
 # Yarn Integrity file
 .yarn-integrity
 
+# CLI compiled binary
+/dist
+
+# local governor policy/runtime state
+/.governor
+
 # dotenv environment variables file
 .env
 .env.test
@@ -113,3 +119,4 @@ dist
 .tern-port
 
 .idea
+.claude

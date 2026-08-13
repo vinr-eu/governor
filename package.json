@@ -1,0 +1,29 @@
+{
+  "name": "governor",
+  "version": "0.1.0",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "governor": "./index.ts"
+  },
+  "scripts": {
+    "cli": "bun run index.ts",
+    "build": "bun build ./index.ts --compile --outfile ./dist/governor",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/prompts": "^2.4.9",
+    "prettier": "3.9.6"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sts": "^3.1110.0",
+    "consola": "^3.4.2",
+    "prompts": "^2.4.2",
+    "yaml": "^2.9.0"
+  }
+}
