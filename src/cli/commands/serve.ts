@@ -3,13 +3,17 @@ import type { AccessKeyCredential } from "../../providers/credentials";
 import { parseFlags } from "../lib/flags";
 import { logger } from "../lib/logger";
 import { promptPassword } from "../lib/prompt";
-import { Vault, vaultExists } from "../lib/vault";
+import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
+
+const DEFAULT_PROFILE = "default";
 
 // Loaded once at startup and held only in this process's memory — callers get
 // results back over HTTP, never the credential itself. Throws if a vault exists
 // but can't be unlocked: that's a real error, not "no credentials configured",
 // and must stop startup rather than silently degrading.
-async function loadAwsCredential(): Promise<AccessKeyCredential | null> {
+async function loadAwsCredentials(): Promise<Map<string, AccessKeyCredential>> {
+  const credentials = new Map<string, AccessKeyCredential>();
+
   if (await vaultExists()) {
     const password = process.stdin.isTTY
       ? await promptPassword("Master password to unlock the vault:")
@@ -22,23 +26,65 @@ async function loadAwsCredential(): Promise<AccessKeyCredential | null> {
     }
 
     const vault = await Vault.open(password);
-    return vault.get<AccessKeyCredential>("aws");
+    for (const profile of await listProfiles("aws")) {
+      const credential = vault.get<AccessKeyCredential>(
+        profileKey("aws", profile),
+      );
+      if (credential) credentials.set(profile, credential);
+    }
+    return credentials;
   }
 
   const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-  return accessKeyId && secretAccessKey
-    ? { accessKeyId, secretAccessKey }
-    : null;
+  if (accessKeyId && secretAccessKey) {
+    credentials.set(DEFAULT_PROFILE, { accessKeyId, secretAccessKey });
+  }
+  return credentials;
+}
+
+async function handleAwsIdentity(
+  credentials: Map<string, AccessKeyCredential>,
+  profile: string,
+) {
+  const credential = credentials.get(profile);
+  if (!credential) {
+    return Response.json(
+      {
+        error: `AWS profile "${profile}" is not connected. Run \`governor connect aws --profile ${profile}\` first.`,
+      },
+      { status: 503 },
+    );
+  }
+
+  const sts = new STSClient({
+    region: process.env.AWS_REGION ?? "us-east-1",
+    credentials: credential,
+  });
+
+  try {
+    const identity = await sts.send(new GetCallerIdentityCommand({}));
+    return Response.json({
+      profile,
+      account: identity.Account,
+      arn: identity.Arn,
+      userId: identity.UserId,
+    });
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 502 },
+    );
+  }
 }
 
 export async function runServe(args: string[]) {
   const { flags } = parseFlags(args);
   const port = Number(flags.port ?? 8787);
 
-  let awsCredential: AccessKeyCredential | null;
+  let awsCredentials: Map<string, AccessKeyCredential>;
   try {
-    awsCredential = await loadAwsCredential();
+    awsCredentials = await loadAwsCredentials();
   } catch (err) {
     logger.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
@@ -46,8 +92,8 @@ export async function runServe(args: string[]) {
   }
 
   logger.info(
-    awsCredential
-      ? "AWS credentials loaded (held in memory, never exposed to callers)."
+    awsCredentials.size > 0
+      ? `AWS credentials loaded for profiles: ${[...awsCredentials.keys()].join(", ")} (held in memory, never exposed to callers).`
       : "No AWS credentials found — run `governor connect aws` or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.",
   );
 
@@ -62,35 +108,10 @@ export async function runServe(args: string[]) {
           status: "stub",
           message: "MCP protocol handling is not implemented yet.",
         }),
-      "/providers/aws/identity": async () => {
-        if (!awsCredential) {
-          return Response.json(
-            {
-              error: "AWS is not connected. Run `governor connect aws` first.",
-            },
-            { status: 503 },
-          );
-        }
-
-        const sts = new STSClient({
-          region: process.env.AWS_REGION ?? "us-east-1",
-          credentials: awsCredential,
-        });
-
-        try {
-          const identity = await sts.send(new GetCallerIdentityCommand({}));
-          return Response.json({
-            account: identity.Account,
-            arn: identity.Arn,
-            userId: identity.UserId,
-          });
-        } catch (err) {
-          return Response.json(
-            { error: err instanceof Error ? err.message : String(err) },
-            { status: 502 },
-          );
-        }
-      },
+      "/providers/aws/identity": async () =>
+        handleAwsIdentity(awsCredentials, DEFAULT_PROFILE),
+      "/providers/aws/:profile/identity": async (req) =>
+        handleAwsIdentity(awsCredentials, req.params.profile),
     },
   });
 

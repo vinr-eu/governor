@@ -7,7 +7,9 @@ import {
 import { parseFlags, type ParsedArgs } from "../lib/flags";
 import { logger } from "../lib/logger";
 import { promptPassword, promptText } from "../lib/prompt";
-import { Vault, vaultExists } from "../lib/vault";
+import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
+
+const DEFAULT_PROFILE = "default";
 
 export async function runConnect(argv: string[]) {
   const { args, flags } = parseFlags(argv);
@@ -29,6 +31,10 @@ export async function runConnect(argv: string[]) {
     return;
   }
 
+  if (flags.list) {
+    return listConnectedProfiles(provider);
+  }
+
   if (provider.authMethod === "access-key") {
     return connectWithAccessKey(provider, flags);
   }
@@ -37,6 +43,22 @@ export async function runConnect(argv: string[]) {
     `"${provider.authMethod}" authentication is not implemented yet for ${provider.label}.`,
   );
   process.exitCode = 1;
+}
+
+async function listConnectedProfiles(provider: ProviderDescriptor) {
+  if (!(await vaultExists())) {
+    logger.error("No vault found. Run `governor init` first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const profiles = await listProfiles(provider.id);
+  if (profiles.length === 0) {
+    logger.info(`No ${provider.label} profiles connected yet.`);
+    return;
+  }
+
+  logger.info(`${provider.label} profiles: ${profiles.join(", ")}`);
 }
 
 async function connectWithAccessKey(
@@ -48,6 +70,14 @@ async function connectWithAccessKey(
     process.exitCode = 1;
     return;
   }
+
+  const profileFlag = flags.profile;
+  if (profileFlag !== undefined && typeof profileFlag !== "string") {
+    logger.error("--profile requires a value.");
+    process.exitCode = 1;
+    return;
+  }
+  const profile = profileFlag ?? DEFAULT_PROFILE;
 
   let accessKeyId = flags["access-key-id"];
   let secretAccessKey = flags["secret-access-key"];
@@ -87,10 +117,12 @@ async function connectWithAccessKey(
   }
 
   const credential: AccessKeyCredential = { accessKeyId, secretAccessKey };
-  vault.set(provider.id, credential);
+  vault.set(profileKey(provider.id, profile), credential);
   await vault.save();
 
-  logger.success(`Connected to ${provider.label} using access keys.`);
+  logger.success(
+    `Connected to ${provider.label} using access keys (profile "${profile}").`,
+  );
   logger.info(
     "Credentials stored in the encrypted vault (never written in plaintext).",
   );

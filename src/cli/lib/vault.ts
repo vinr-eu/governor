@@ -116,3 +116,29 @@ export async function vaultExists(): Promise<boolean> {
 export function vaultPath(): string {
   return VAULT_PATH;
 }
+
+const PROFILE_SEPARATOR = "::";
+
+/** Composite vault key for a named profile of a provider, e.g. "aws::staging". */
+export function profileKey(providerId: string, profile: string): string {
+  return `${providerId}${PROFILE_SEPARATOR}${profile}`;
+}
+
+/**
+ * Entry keys (e.g. provider ids, "aws::staging") are stored in plaintext in the
+ * vault file — only the values are encrypted, matching the existing single-profile
+ * design. That lets profile names be listed without unlocking the vault.
+ */
+export async function listEntryKeys(): Promise<string[]> {
+  const raw = (await Bun.file(VAULT_PATH).json()) as VaultFile;
+  return Object.keys(raw.entries);
+}
+
+/** Profile names stored for a given provider, derived from plaintext entry keys. */
+export async function listProfiles(providerId: string): Promise<string[]> {
+  const prefix = `${providerId}${PROFILE_SEPARATOR}`;
+  const keys = await listEntryKeys();
+  return keys
+    .filter((k) => k.startsWith(prefix))
+    .map((k) => k.slice(prefix.length));
+}
