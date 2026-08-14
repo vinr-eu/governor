@@ -11,13 +11,13 @@ import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
 
 const DEFAULT_PROFILE = "default";
 
-export async function runConnect(argv: string[]) {
+export async function runSetup(argv: string[]) {
   const { args, flags } = parseFlags(argv);
   const providerId = args[0];
   const knownProviders = PROVIDERS.map((p) => p.id).join(", ");
 
   if (!providerId) {
-    logger.error("Usage: governor connect <provider> [options]");
+    logger.error("Usage: governor setup <provider> [options]");
     logger.error(`Known providers: ${knownProviders}`);
     process.exitCode = 1;
     return;
@@ -32,11 +32,11 @@ export async function runConnect(argv: string[]) {
   }
 
   if (flags.list) {
-    return listConnectedProfiles(provider);
+    return listConfiguredProfiles(provider);
   }
 
   if (provider.authMethod === "access-key") {
-    return connectWithAccessKey(provider, flags);
+    return setupWithAccessKey(provider, flags);
   }
 
   logger.error(
@@ -45,7 +45,7 @@ export async function runConnect(argv: string[]) {
   process.exitCode = 1;
 }
 
-async function listConnectedProfiles(provider: ProviderDescriptor) {
+async function listConfiguredProfiles(provider: ProviderDescriptor) {
   if (!(await vaultExists())) {
     logger.error("No vault found. Run `governor init` first.");
     process.exitCode = 1;
@@ -54,14 +54,14 @@ async function listConnectedProfiles(provider: ProviderDescriptor) {
 
   const profiles = await listProfiles(provider.id);
   if (profiles.length === 0) {
-    logger.info(`No ${provider.label} profiles connected yet.`);
+    logger.info(`No ${provider.label} profiles set up yet.`);
     return;
   }
 
   logger.info(`${provider.label} profiles: ${profiles.join(", ")}`);
 }
 
-async function connectWithAccessKey(
+async function setupWithAccessKey(
   provider: ProviderDescriptor,
   flags: ParsedArgs["flags"],
 ) {
@@ -121,7 +121,7 @@ async function connectWithAccessKey(
   await vault.save();
 
   logger.success(
-    `Connected to ${provider.label} using access keys (profile "${profile}").`,
+    `Set up ${provider.label} using access keys (profile "${profile}").`,
   );
   logger.info(
     "Credentials stored in the encrypted vault (never written in plaintext).",

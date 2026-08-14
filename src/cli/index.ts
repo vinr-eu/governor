@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { runConnect } from "./commands/connect";
 import { runInit } from "./commands/init";
 import { runServe } from "./commands/serve";
+import { runSetup } from "./commands/setup";
 import { printHelp, VERSION } from "./help";
 import { logger } from "./lib/logger";
 
@@ -20,8 +20,8 @@ async function main() {
       return;
     case "init":
       return runInit();
-    case "connect":
-      return runConnect(rest);
+    case "setup":
+      return runSetup(rest);
     case "serve":
       return runServe(rest);
     default:

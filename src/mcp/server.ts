@@ -21,7 +21,7 @@ export function createMcpServer(
     {
       title: "List connected AWS profiles",
       description:
-        "Lists the AWS profile names currently connected to this governor instance (via `governor connect aws --profile <name>`).",
+        "Lists the AWS profile names currently connected to this governor instance (set up via `governor setup aws --profile <name>`).",
       inputSchema: {},
     },
     async () => ({
@@ -56,7 +56,7 @@ export function createMcpServer(
           content: [
             {
               type: "text",
-              text: `AWS profile "${resolvedProfile}" is not connected. Run \`governor connect aws --profile ${resolvedProfile}\` first.`,
+              text: `AWS profile "${resolvedProfile}" is not connected. Run \`governor setup aws --profile ${resolvedProfile}\` first.`,
             },
           ],
         };

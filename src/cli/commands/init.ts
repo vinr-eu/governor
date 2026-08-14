@@ -22,6 +22,6 @@ export async function runInit() {
   await Vault.create(password);
   logger.success(`Vault created at ${vaultPath()}.`);
   logger.info(
-    "Run `governor connect <provider>` to add credentials, or `governor serve` to start the broker.",
+    "Run `governor setup <provider>` to add credentials, or `governor serve` to start the broker.",
   );
 }

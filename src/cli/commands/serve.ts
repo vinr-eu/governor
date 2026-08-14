@@ -141,7 +141,7 @@ async function handleAwsIdentity(
   if (!credential) {
     return Response.json(
       {
-        error: `AWS profile "${profile}" is not connected. Run \`governor connect aws --profile ${profile}\` first.`,
+        error: `AWS profile "${profile}" is not set up. Run \`governor setup aws --profile ${profile}\` first.`,
       },
       { status: 503 },
     );
@@ -178,7 +178,7 @@ export async function runServe(args: string[]) {
   logger.info(
     awsCredentials.size > 0
       ? `AWS credentials loaded for profiles: ${[...awsCredentials.keys()].join(", ")} (held in memory, never exposed to callers).`
-      : "No AWS credentials found — run `governor connect aws` or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.",
+      : "No AWS credentials found — run `governor setup aws` or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.",
   );
 
   const mcpToken = process.env.GOVERNOR_MCP_TOKEN ?? randomBytes(24).toString("base64url");

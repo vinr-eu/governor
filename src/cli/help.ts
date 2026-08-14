@@ -9,9 +9,9 @@ Usage: governor <command> [options]
 
 Commands:
   init                        Create the encrypted credential vault
-  connect <provider>          Connect a provider (e.g. aws, datadog)
+  setup <provider>            Set up a provider (e.g. aws, datadog)
     --profile <name>            Store under a named profile (default: "default")
-    --list                      List profiles already connected for the provider
+    --list                      List profiles already set up for the provider
   serve                       Start the MCP endpoint
     --host <addr>                Bind address (default: 127.0.0.1, loopback only)
     --port <port>                Port to listen on (default: 8787)
