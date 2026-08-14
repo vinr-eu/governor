@@ -10,7 +10,7 @@ export async function runInit() {
   }
 
   const password = await promptPassword(
-    "Set a master password for this project's vault:",
+    "Set a master password for your vault:",
   );
   const confirmation = await promptPassword("Confirm master password:");
   if (password !== confirmation) {
@@ -22,6 +22,6 @@ export async function runInit() {
   await Vault.create(password);
   logger.success(`Vault created at ${vaultPath()}.`);
   logger.info(
-    "Run `governor setup <provider>` to add credentials, or `governor serve` to start the broker.",
+    "Run `governor setup <provider>` to add credentials, or `governor serve` to start the MCP server.",
   );
 }

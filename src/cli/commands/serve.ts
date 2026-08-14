@@ -1,4 +1,9 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer } from "../../mcp/server";
@@ -11,12 +16,10 @@ import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
 
 const DEFAULT_PROFILE = "default";
 
-// MCP sessions live for the lifetime of this process. A session's transport is
-// created on its "initialize" request and reused for every later request that
-// carries its Mcp-Session-Id — required because the SDK ties protocol state
-// (has-initialized, pending SSE streams) to a single transport instance, so a
-// fresh transport per request can never get past "Server not initialized".
-const mcpTransports = new Map<string, WebStandardStreamableHTTPServerTransport>();
+const mcpTransports = new Map<
+  string,
+  WebStandardStreamableHTTPServerTransport
+>();
 
 async function handleMcp(
   req: Request,
@@ -43,7 +46,10 @@ async function handleMcp(
     return Response.json(
       {
         jsonrpc: "2.0",
-        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        error: {
+          code: -32000,
+          message: "Bad Request: No valid session ID provided",
+        },
         id: null,
       },
       { status: 400 },
@@ -55,7 +61,10 @@ async function handleMcp(
     return Response.json(
       {
         jsonrpc: "2.0",
-        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        error: {
+          code: -32000,
+          message: "Bad Request: No valid session ID provided",
+        },
         id: null,
       },
       { status: 400 },
@@ -77,10 +86,6 @@ async function handleMcp(
   return transport.handleRequest(req, { parsedBody: body });
 }
 
-// Loaded once at startup and held only in this process's memory — callers get
-// results back over HTTP, never the credential itself. Throws if a vault exists
-// but can't be unlocked: that's a real error, not "no credentials configured",
-// and must stop startup rather than silently degrading.
 async function loadAwsCredentials(): Promise<Map<string, AccessKeyCredential>> {
   const credentials = new Map<string, AccessKeyCredential>();
 
@@ -181,11 +186,14 @@ export async function runServe(args: string[]) {
       : "No AWS credentials found — run `governor setup aws` or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.",
   );
 
-  const mcpToken = process.env.GOVERNOR_MCP_TOKEN ?? randomBytes(24).toString("base64url");
+  const mcpToken =
+    process.env.GOVERNOR_MCP_TOKEN ?? randomBytes(24).toString("base64url");
   if (process.env.GOVERNOR_MCP_TOKEN) {
     logger.info("MCP bearer token loaded from GOVERNOR_MCP_TOKEN.");
   } else {
-    logger.warn(`Generated a one-time MCP bearer token for this run: ${mcpToken}`);
+    logger.warn(
+      `Generated a one-time MCP bearer token for this run: ${mcpToken}`,
+    );
     logger.warn(
       "It won't be shown again and isn't persisted anywhere — copy it now, or set GOVERNOR_MCP_TOKEN to pin a stable value across restarts.",
     );
@@ -205,13 +213,14 @@ export async function runServe(args: string[]) {
       },
       "/providers/aws/identity": async (req) => {
         const unauthorized = requireAuth(req, mcpToken);
-        return unauthorized ?? handleAwsIdentity(awsCredentials, DEFAULT_PROFILE);
+        return (
+          unauthorized ?? handleAwsIdentity(awsCredentials, DEFAULT_PROFILE)
+        );
       },
       "/providers/aws/:profile/identity": async (req) => {
         const unauthorized = requireAuth(req, mcpToken);
         return (
-          unauthorized ??
-          handleAwsIdentity(awsCredentials, req.params.profile)
+          unauthorized ?? handleAwsIdentity(awsCredentials, req.params.profile)
         );
       },
     },
