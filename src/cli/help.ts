@@ -12,6 +12,7 @@ Commands:
   setup <provider>            Set up a provider (e.g. aws, datadog)
     --profile <name>            Store under a named profile (default: "default")
     --list                      List profiles already set up for the provider
+  rotate-password             Re-encrypt the vault under a new master password
   serve                       Start the MCP endpoint
     --host <addr>                Bind address (default: 127.0.0.1, loopback only)
     --port <port>                Port to listen on (default: 8787)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { runInit } from "./commands/init";
+import { runRotatePassword } from "./commands/rotate-password";
 import { runServe } from "./commands/serve";
 import { runSetup } from "./commands/setup";
 import { printHelp, VERSION } from "./help";
@@ -22,6 +23,8 @@ async function main() {
       return runInit();
     case "setup":
       return runSetup(rest);
+    case "rotate-password":
+      return runRotatePassword();
     case "serve":
       return runServe(rest);
     default:

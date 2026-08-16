@@ -8,7 +8,22 @@ import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 
 const VAULT_PATH = join(process.cwd(), ".governor", "vault.enc");
-const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
+
+interface ScryptParams {
+  N: number;
+  r: number;
+  p: number;
+}
+
+// N=2^17, r=8, p=1: OWASP's strongest listed scrypt config (128 MiB), per
+// https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt.
+// Cheap to afford since this only runs once per `governor` invocation, not
+// per-request. Stored in the vault file itself (see `kdf` below) so bumping
+// this later can't break vaults created under the old params.
+const CURRENT_SCRYPT_PARAMS: ScryptParams = { N: 131072, r: 8, p: 1 };
+// What vaults created before `kdf` was persisted actually used — kept only
+// as a fallback for files missing the field, never for new vaults.
+const LEGACY_SCRYPT_PARAMS: ScryptParams = { N: 16384, r: 8, p: 1 };
 const KEY_LENGTH = 32;
 const VERIFIER_PLAINTEXT = "governor-vault";
 
@@ -21,12 +36,21 @@ interface EncryptedBlob {
 interface VaultFile {
   version: 1;
   salt: string;
+  /** scrypt params this vault's key was derived with; absent means `LEGACY_SCRYPT_PARAMS`. */
+  kdf?: ScryptParams;
   verifier: EncryptedBlob;
   entries: Record<string, EncryptedBlob>;
 }
 
-function deriveKey(password: string, salt: Buffer): Buffer {
-  return scryptSync(password, salt, KEY_LENGTH, SCRYPT_PARAMS);
+function deriveKey(
+  password: string,
+  salt: Buffer,
+  params: ScryptParams,
+): Buffer {
+  // scrypt needs ~128*N*r bytes of working memory; Node's scryptSync defaults
+  // to a 32 MiB ceiling, so any params above that need an explicit override.
+  const maxmem = Math.ceil(128 * params.N * params.r * 1.5);
+  return scryptSync(password, salt, KEY_LENGTH, { ...params, maxmem });
 }
 
 function encrypt(key: Buffer, plaintext: string): EncryptedBlob {
@@ -59,16 +83,17 @@ function decrypt(key: Buffer, blob: EncryptedBlob): string {
 
 export class Vault {
   private constructor(
-    private readonly key: Buffer,
+    private key: Buffer,
     private readonly file: VaultFile,
   ) {}
 
   static async create(password: string): Promise<Vault> {
     const salt = randomBytes(16);
-    const key = deriveKey(password, salt);
+    const key = deriveKey(password, salt, CURRENT_SCRYPT_PARAMS);
     const file: VaultFile = {
       version: 1,
       salt: salt.toString("base64"),
+      kdf: CURRENT_SCRYPT_PARAMS,
       verifier: encrypt(key, VERIFIER_PLAINTEXT),
       entries: {},
     };
@@ -80,7 +105,11 @@ export class Vault {
   static async open(password: string): Promise<Vault> {
     const raw = await Bun.file(VAULT_PATH).json();
     const file = raw as VaultFile;
-    const key = deriveKey(password, Buffer.from(file.salt, "base64"));
+    const key = deriveKey(
+      password,
+      Buffer.from(file.salt, "base64"),
+      file.kdf ?? LEGACY_SCRYPT_PARAMS,
+    );
 
     let verified: string;
     try {
@@ -103,6 +132,37 @@ export class Vault {
 
   set(providerId: string, value: unknown): void {
     this.file.entries[providerId] = encrypt(this.key, JSON.stringify(value));
+  }
+
+  /**
+   * Re-encrypts every entry under a freshly derived key from `newPassword`
+   * (new salt, current scrypt params) — the standard remediation for a
+   * suspected master-password compromise, per
+   * https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html#key-rotation.
+   * Also upgrades a legacy vault's KDF params to `CURRENT_SCRYPT_PARAMS` as
+   * a side effect, since it's already deriving a fresh key either way.
+   */
+  async rotatePassword(newPassword: string): Promise<void> {
+    const decrypted = new Map<string, unknown>();
+    for (const providerId of Object.keys(this.file.entries)) {
+      decrypted.set(providerId, this.get(providerId));
+    }
+
+    const salt = randomBytes(16);
+    const newKey = deriveKey(newPassword, salt, CURRENT_SCRYPT_PARAMS);
+
+    const entries: Record<string, EncryptedBlob> = {};
+    for (const [providerId, value] of decrypted) {
+      entries[providerId] = encrypt(newKey, JSON.stringify(value));
+    }
+
+    this.file.salt = salt.toString("base64");
+    this.file.kdf = CURRENT_SCRYPT_PARAMS;
+    this.file.verifier = encrypt(newKey, VERIFIER_PLAINTEXT);
+    this.file.entries = entries;
+    this.key = newKey;
+
+    await this.save();
   }
 
   async save(): Promise<void> {
