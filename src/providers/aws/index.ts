@@ -13,8 +13,10 @@ import {
   createS3PresignedDownloadUrl,
   describeDynamoDbTable,
   fetchAwsCallerIdentity,
+  getCloudWatchMetricData,
   getDynamoDbItem,
   listCloudWatchLogGroups,
+  listCloudWatchMetrics,
   listDynamoDbTables,
   listS3Buckets,
   queryDynamoDbTable,
@@ -734,6 +736,178 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
             );
             return {
               content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_cloudwatch_list_metrics",
+      {
+        title: "List CloudWatch metrics",
+        description:
+          'Discovers which CloudWatch metrics actually exist — namespace, metric name, and dimensions — so you know exactly what to pass to aws_cloudwatch_get_metric_data. Also doubles as free resource inventory: e.g. namespace "AWS/ECS" + metricName "CPUUtilization" returns every {ClusterName, ServiceName} pair currently publishing it; "AWS/RDS" + "FreeStorageSpace" returns every DBInstanceIdentifier. Narrow with namespace/metricName/dimensions (all server-side, cheap) — omitting all of them lists every metric in the account, which can be large.',
+        inputSchema: {
+          namespace: z
+            .string()
+            .optional()
+            .describe(
+              'Filter to metrics in this namespace, e.g. "AWS/RDS", "AWS/ECS", "AWS/Lambda".',
+            ),
+          metricName: z
+            .string()
+            .optional()
+            .describe(
+              'Filter to metrics with this exact name, e.g. "CPUUtilization".',
+            ),
+          dimensions: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe(
+              'Filter to metrics matching these exact dimension values, e.g. {"ClusterName": "prod"}. All given dimensions must match.',
+            ),
+          maxResults: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe(
+              "Maximum number of metrics to return (default 200, max 1000).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_cloudwatch_list_metrics",
+        async ({
+          namespace,
+          metricName,
+          dimensions,
+          maxResults,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const metrics = await listCloudWatchMetrics(credential, {
+              region,
+              namespace,
+              metricName,
+              dimensions,
+              maxResults,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify({ metrics }) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_cloudwatch_get_metric_data",
+      {
+        title: "Get CloudWatch metric data",
+        description:
+          "Fetches datapoints for one or more CloudWatch metrics in a single call — batch every metric/resource you need to check here (e.g. CPUUtilization and MemoryUtilization for every ECS service in a cluster, or FreeStorageSpace for every RDS instance) rather than calling this once per metric. Each result carries back its namespace/metricName/dimensions so you can match it to the query that produced it. startTime/endTime default to the last hour ending now, so an omitted range can't accidentally scan a huge span. Use aws_cloudwatch_list_metrics first to find the exact dimensions a resource publishes under.",
+        inputSchema: {
+          queries: z
+            .array(
+              z.object({
+                namespace: z
+                  .string()
+                  .describe('CloudWatch namespace, e.g. "AWS/RDS", "AWS/ECS".'),
+                metricName: z
+                  .string()
+                  .describe(
+                    'Metric name, e.g. "CPUUtilization", "FreeStorageSpace".',
+                  ),
+                dimensions: z
+                  .record(z.string(), z.string())
+                  .optional()
+                  .describe(
+                    'Exact dimensions identifying the resource, e.g. {"DBInstanceIdentifier": "prod-orders-db"}. Use aws_cloudwatch_list_metrics to find them.',
+                  ),
+                stat: z
+                  .string()
+                  .optional()
+                  .describe(
+                    'Statistic to compute, e.g. "Average" (default), "Sum", "Maximum", "Minimum", "SampleCount", or a percentile like "p99".',
+                  ),
+              }),
+            )
+            .min(1)
+            .max(100)
+            .describe(
+              "One or more metrics to fetch in a single call (max 100) — batch everything you need checked here instead of calling this tool once per metric.",
+            ),
+          period: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              "Granularity of each datapoint in seconds (default 300). Must be a period CloudWatch supports for the metric's resolution.",
+            ),
+          startTime: z
+            .string()
+            .optional()
+            .describe(
+              "ISO 8601 timestamp to fetch from. Defaults to 1 hour before endTime.",
+            ),
+          endTime: z
+            .string()
+            .optional()
+            .describe("ISO 8601 timestamp to fetch until. Defaults to now."),
+          maxDatapoints: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe(
+              "Maximum datapoints to return per metric (default 200, max 1000).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_cloudwatch_get_metric_data",
+        async ({
+          queries,
+          period,
+          startTime,
+          endTime,
+          maxDatapoints,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const results = await getCloudWatchMetricData(credential, {
+              queries,
+              region,
+              period,
+              startTime,
+              endTime,
+              maxDatapoints,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify({ results }) }],
             };
           } catch (err) {
             return toErrorResult(err);

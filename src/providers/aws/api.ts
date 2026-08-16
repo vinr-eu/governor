@@ -20,6 +20,11 @@ import {
   FilterLogEventsCommand,
   GetLogEventsCommand,
 } from "@aws-sdk/client-cloudwatch-logs";
+import {
+  CloudWatchClient,
+  GetMetricDataCommand,
+  ListMetricsCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { Signer } from "@aws-sdk/rds-signer";
 import {
   DescribeTableCommand,
@@ -1116,4 +1121,239 @@ async function tailCloudWatchLogs(
   }
 
   return toTailResult(events, options.maxResults);
+}
+
+function cloudWatchClient(
+  credential: AccessKeyCredential,
+  region?: string,
+): CloudWatchClient {
+  return new CloudWatchClient({
+    region: region ?? process.env.AWS_REGION ?? "us-east-1",
+    credentials: credential,
+  });
+}
+
+export interface CloudWatchMetricIdentity {
+  namespace: string;
+  metricName: string;
+  dimensions: Record<string, string>;
+}
+
+const DEFAULT_METRICS_MAX_RESULTS = 200;
+const MAX_METRICS_MAX_RESULTS = 1000;
+
+/**
+ * Discovers which CloudWatch metrics actually exist (namespace, metric name,
+ * dimensions) rather than requiring the caller to already know the exact
+ * dimension values a service publishes under. This doubles as free resource
+ * inventory: e.g. namespace "AWS/ECS" + metricName "CPUUtilization" returns
+ * every {ClusterName, ServiceName} pair currently publishing it, without a
+ * dedicated ECS tool.
+ */
+export async function listCloudWatchMetrics(
+  credential: AccessKeyCredential,
+  options: {
+    region?: string;
+    namespace?: string;
+    metricName?: string;
+    dimensions?: Record<string, string>;
+    maxResults?: number;
+  } = {},
+): Promise<CloudWatchMetricIdentity[]> {
+  const maxResults = Math.min(
+    options.maxResults ?? DEFAULT_METRICS_MAX_RESULTS,
+    MAX_METRICS_MAX_RESULTS,
+  );
+  const cw = cloudWatchClient(credential, options.region);
+
+  const metrics: CloudWatchMetricIdentity[] = [];
+  let nextToken: string | undefined;
+
+  do {
+    const page = await cw.send(
+      new ListMetricsCommand({
+        Namespace: options.namespace,
+        MetricName: options.metricName,
+        Dimensions: options.dimensions
+          ? Object.entries(options.dimensions).map(([Name, Value]) => ({
+              Name,
+              Value,
+            }))
+          : undefined,
+        NextToken: nextToken,
+      }),
+    );
+    for (const metric of page.Metrics ?? []) {
+      if (!metric.Namespace || !metric.MetricName) continue;
+      metrics.push({
+        namespace: metric.Namespace,
+        metricName: metric.MetricName,
+        dimensions: Object.fromEntries(
+          (metric.Dimensions ?? [])
+            .filter((d) => d.Name && d.Value)
+            .map((d) => [d.Name as string, d.Value as string]),
+        ),
+      });
+      if (metrics.length >= maxResults) break;
+    }
+    nextToken = metrics.length < maxResults ? page.NextToken : undefined;
+  } while (nextToken);
+
+  return metrics;
+}
+
+export interface CloudWatchMetricQuery {
+  namespace: string;
+  metricName: string;
+  dimensions?: Record<string, string>;
+  stat?: string;
+}
+
+export interface CloudWatchMetricDatapoint {
+  timestamp: string;
+  value: number;
+}
+
+export interface CloudWatchMetricResult extends CloudWatchMetricIdentity {
+  stat: string;
+  datapoints: CloudWatchMetricDatapoint[];
+  truncated: boolean;
+}
+
+const DEFAULT_METRIC_STAT = "Average";
+const DEFAULT_METRIC_PERIOD_SECONDS = 300;
+const DEFAULT_METRIC_DATA_MAX_DATAPOINTS = 200;
+const MAX_METRIC_DATA_MAX_DATAPOINTS = 1000;
+const MAX_METRIC_DATA_QUERIES = 100;
+const DEFAULT_METRIC_DATA_LOOKBACK_MS = 60 * 60 * 1000;
+
+const metricQueryId = (index: number) => `m${index}`;
+
+/**
+ * Fetches datapoints for one or more metrics in a single CloudWatch
+ * GetMetricData call, batched via CloudWatch's own MetricDataQueries rather
+ * than one API call per metric — the shape a "scan every service/instance
+ * for anomalies" question actually needs (e.g. CPU + memory across every
+ * ECS service in a cluster) instead of N round trips. `startTime`/`endTime`
+ * default to the last hour ending now, same as `searchCloudWatchLogs`, so an
+ * omitted range can't accidentally scan a huge span. Paginates internally
+ * until every query's `maxDatapoints` cap is hit or the range is exhausted;
+ * each result's `truncated` flag says whether more datapoints exist beyond
+ * the cap.
+ */
+export async function getCloudWatchMetricData(
+  credential: AccessKeyCredential,
+  options: {
+    queries: CloudWatchMetricQuery[];
+    region?: string;
+    period?: number;
+    startTime?: string;
+    endTime?: string;
+    maxDatapoints?: number;
+  },
+): Promise<CloudWatchMetricResult[]> {
+  if (options.queries.length === 0) {
+    throw new Error("queries must contain at least one metric.");
+  }
+  if (options.queries.length > MAX_METRIC_DATA_QUERIES) {
+    throw new Error(
+      `Too many queries (${options.queries.length}) — max ${MAX_METRIC_DATA_QUERIES} per call.`,
+    );
+  }
+
+  const maxDatapoints = Math.min(
+    options.maxDatapoints ?? DEFAULT_METRIC_DATA_MAX_DATAPOINTS,
+    MAX_METRIC_DATA_MAX_DATAPOINTS,
+  );
+  const period = options.period ?? DEFAULT_METRIC_PERIOD_SECONDS;
+
+  const endTime = options.endTime ? Date.parse(options.endTime) : Date.now();
+  if (Number.isNaN(endTime)) {
+    throw new Error(`Invalid endTime: "${options.endTime}"`);
+  }
+  const startTime = options.startTime
+    ? Date.parse(options.startTime)
+    : endTime - DEFAULT_METRIC_DATA_LOOKBACK_MS;
+  if (Number.isNaN(startTime)) {
+    throw new Error(`Invalid startTime: "${options.startTime}"`);
+  }
+
+  const cw = cloudWatchClient(credential, options.region);
+
+  const metricDataQueries = options.queries.map((query, index) => ({
+    Id: metricQueryId(index),
+    MetricStat: {
+      Metric: {
+        Namespace: query.namespace,
+        MetricName: query.metricName,
+        Dimensions: query.dimensions
+          ? Object.entries(query.dimensions).map(([Name, Value]) => ({
+              Name,
+              Value,
+            }))
+          : undefined,
+      },
+      Period: period,
+      Stat: query.stat ?? DEFAULT_METRIC_STAT,
+    },
+    ReturnData: true,
+  }));
+
+  const collected = new Map<string, { timestampMs: number; value: number }[]>(
+    metricDataQueries.map((q) => [q.Id, []]),
+  );
+  const truncatedIds = new Set<string>();
+
+  let nextToken: string | undefined;
+  do {
+    const page = await cw.send(
+      new GetMetricDataCommand({
+        MetricDataQueries: metricDataQueries,
+        StartTime: new Date(startTime),
+        EndTime: new Date(endTime),
+        ScanBy: "TimestampAscending",
+        NextToken: nextToken,
+      }),
+    );
+
+    for (const result of page.MetricDataResults ?? []) {
+      if (!result.Id) continue;
+      const bucket = collected.get(result.Id);
+      if (!bucket) continue;
+      const timestamps = result.Timestamps ?? [];
+      const values = result.Values ?? [];
+      for (let i = 0; i < timestamps.length; i++) {
+        if (bucket.length >= maxDatapoints) {
+          truncatedIds.add(result.Id);
+          break;
+        }
+        const timestamp = timestamps[i];
+        const value = values[i];
+        if (!timestamp || value === undefined) continue;
+        bucket.push({ timestampMs: timestamp.getTime(), value });
+      }
+      if (bucket.length >= maxDatapoints) truncatedIds.add(result.Id);
+    }
+
+    const allFull = [...collected.values()].every(
+      (bucket) => bucket.length >= maxDatapoints,
+    );
+    nextToken = allFull ? undefined : page.NextToken;
+  } while (nextToken);
+
+  return options.queries.map((query, index) => {
+    const bucket = collected.get(metricQueryId(index)) ?? [];
+    bucket.sort((a, b) => a.timestampMs - b.timestampMs);
+    return {
+      namespace: query.namespace,
+      metricName: query.metricName,
+      dimensions: query.dimensions ?? {},
+      stat: query.stat ?? DEFAULT_METRIC_STAT,
+      datapoints: bucket.map((point) => ({
+        timestamp: new Date(point.timestampMs).toISOString(),
+        value: point.value,
+      })),
+      truncated: truncatedIds.has(metricQueryId(index)),
+    };
+  });
 }
