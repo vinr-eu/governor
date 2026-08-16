@@ -21,8 +21,12 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1111.0",
+    "@aws-sdk/client-rds": "^3.1111.0",
     "@aws-sdk/client-s3": "^3.1111.0",
+    "@aws-sdk/client-ssm": "^3.1111.0",
     "@aws-sdk/client-sts": "^3.1110.0",
+    "@aws-sdk/rds-signer": "^3.1111.0",
     "@aws-sdk/s3-request-presigner": "^3.1111.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "consola": "^3.4.2",

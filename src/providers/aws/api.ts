@@ -7,7 +7,16 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
+import {
+  DescribeDBClustersCommand,
+  DescribeDBInstancesCommand,
+  RDSClient,
+} from "@aws-sdk/client-rds";
+import { DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
+import { Signer } from "@aws-sdk/rds-signer";
+import { SQL } from "bun";
 import type { AccessKeyCredential } from "../credentials";
+import { openSsmPortForwardTunnel } from "./ssm-tunnel";
 
 export interface AwsCallerIdentity {
   account?: string;
@@ -200,4 +209,217 @@ export async function createS3PresignedDownloadUrl(
     new GetObjectCommand({ Bucket: bucket, Key: key }),
     { expiresIn: ttl },
   );
+}
+
+export interface RdsQueryResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+}
+
+const DEFAULT_RDS_QUERY_MAX_ROWS = 200;
+const MAX_RDS_QUERY_MAX_ROWS = 1000;
+
+// Every real RDS/Aurora setup reaches the DB by opening a network connection
+// — the Data API's HTTPS-only path only exists for Aurora with it explicitly
+// turned on, and even then still requires a Secrets Manager secret to exist.
+// So this always goes through an SSM Session Manager tunnel via a bastion
+// EC2 instance already inside the target's VPC (no inbound security group
+// rule, public IP, or SSH key needed), and authenticates with a short-lived
+// IAM database-auth token instead of a stored password — no DB secret is
+// ever persisted by governor.
+
+interface RdsEndpointLocation {
+  host: string;
+  port: number;
+  adapter: "postgres" | "mysql";
+}
+
+function adapterForEngine(engine: string): "postgres" | "mysql" | undefined {
+  if (engine.includes("postgres")) return "postgres";
+  if (engine.includes("mysql") || engine.includes("mariadb")) return "mysql";
+  return undefined;
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return typeof (err as { name?: string })?.name === "string" &&
+    (err as { name: string }).name.includes("NotFound");
+}
+
+/**
+ * Resolves `name` to a connectable endpoint, trying it first as a plain RDS
+ * instance identifier, then as an Aurora cluster identifier (using the
+ * cluster's own stable writer endpoint, which — unlike a specific member
+ * instance's endpoint — doesn't change across failover).
+ */
+async function resolveRdsEndpoint(
+  credential: AccessKeyCredential,
+  name: string,
+  region: string,
+): Promise<RdsEndpointLocation> {
+  const rds = new RDSClient({ region, credentials: credential });
+
+  try {
+    const result = await rds.send(
+      new DescribeDBInstancesCommand({ DBInstanceIdentifier: name }),
+    );
+    const instance = result.DBInstances?.[0];
+    if (instance?.Endpoint?.Address && instance.Endpoint.Port) {
+      const adapter = adapterForEngine(instance.Engine ?? "");
+      if (!adapter) {
+        throw new Error(
+          `RDS instance "${name}" uses engine "${instance.Engine}", which isn't supported — only Postgres- and MySQL-compatible engines are.`,
+        );
+      }
+      return { host: instance.Endpoint.Address, port: instance.Endpoint.Port, adapter };
+    }
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err;
+  }
+
+  try {
+    const result = await rds.send(
+      new DescribeDBClustersCommand({ DBClusterIdentifier: name }),
+    );
+    const cluster = result.DBClusters?.[0];
+    if (cluster?.Endpoint && cluster.Port) {
+      const adapter = adapterForEngine(cluster.Engine ?? "");
+      if (!adapter) {
+        throw new Error(
+          `Aurora cluster "${name}" uses engine "${cluster.Engine}", which isn't supported — only Postgres- and MySQL-compatible engines are.`,
+        );
+      }
+      return { host: cluster.Endpoint, port: cluster.Port, adapter };
+    }
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err;
+  }
+
+  throw new Error(
+    `No RDS instance or Aurora cluster named "${name}" was found in region ${region}.`,
+  );
+}
+
+async function resolveBastionInstanceId(
+  credential: AccessKeyCredential,
+  bastionName: string,
+  region: string,
+): Promise<string> {
+  const ec2 = new EC2Client({ region, credentials: credential });
+  const result = await ec2.send(
+    new DescribeInstancesCommand({
+      Filters: [
+        { Name: "tag:Name", Values: [bastionName] },
+        { Name: "instance-state-name", Values: ["running"] },
+      ],
+    }),
+  );
+  const instances = (result.Reservations ?? []).flatMap((r) => r.Instances ?? []);
+  if (instances.length === 0) {
+    throw new Error(
+      `No running EC2 instance named "${bastionName}" was found in region ${region}.`,
+    );
+  }
+  if (instances.length > 1) {
+    throw new Error(
+      `${instances.length} running EC2 instances are named "${bastionName}" (${instances
+        .map((i) => i.InstanceId)
+        .join(", ")}) — the Name tag must be unique to use it as a bastion.`,
+    );
+  }
+  const instanceId = instances[0]?.InstanceId;
+  if (!instanceId) {
+    throw new Error(`Bastion instance "${bastionName}" has no instance id.`);
+  }
+  return instanceId;
+}
+
+// BigInt/Date/Buffer values from the DB driver aren't JSON-serializable as-is
+// (JSON.stringify throws on bigint) — this brings them down to plain JSON
+// the same way decodeField does for the Data API path above.
+function toJsonSafe(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (Buffer.isBuffer(value)) return value.toString("base64");
+  return value;
+}
+
+/**
+ * Runs one SQL statement against an RDS instance or Aurora cluster — reached
+ * through an SSM tunnel via a bastion EC2 instance already inside its VPC,
+ * and authenticated with a short-lived IAM database-auth token instead of a
+ * stored password, so governor never persists a DB secret at all.
+ *
+ * Every name here — the database, the bastion, the DB user — is the plain
+ * human-readable name shown in each console, not an ARN or instance id.
+ */
+export async function queryRdsInstance(
+  credential: AccessKeyCredential,
+  options: {
+    name: string;
+    bastionName: string;
+    dbUser: string;
+    database: string;
+    sql: string;
+    region?: string;
+    maxRows?: number;
+  },
+): Promise<RdsQueryResult> {
+  const maxRows = Math.min(
+    options.maxRows ?? DEFAULT_RDS_QUERY_MAX_ROWS,
+    MAX_RDS_QUERY_MAX_ROWS,
+  );
+  const region = options.region ?? process.env.AWS_REGION ?? "us-east-1";
+
+  const [{ host, port, adapter }, bastionInstanceId] = await Promise.all([
+    resolveRdsEndpoint(credential, options.name, region),
+    resolveBastionInstanceId(credential, options.bastionName, region),
+  ]);
+
+  const tunnel = await openSsmPortForwardTunnel(credential, {
+    instanceId: bastionInstanceId,
+    remoteHost: host,
+    remotePort: port,
+    region,
+  });
+
+  const signer = new Signer({
+    hostname: host,
+    port,
+    region,
+    username: options.dbUser,
+    credentials: credential,
+  });
+
+  // The TLS handshake happens over the SSM tunnel to the real RDS endpoint,
+  // but we connect via 127.0.0.1 — the server cert's hostname will never
+  // match that, so hostname/CA verification is skipped below. The hop is
+  // still encrypted; what's skipped is validating who's on the other end,
+  // which the already-authenticated SSM tunnel covers.
+  const sql = new SQL({
+    adapter,
+    hostname: "127.0.0.1",
+    port: tunnel.localPort,
+    database: options.database,
+    username: options.dbUser,
+    password: () => signer.getAuthToken(),
+    tls: { rejectUnauthorized: false },
+  });
+
+  try {
+    const records = (await sql.unsafe(options.sql)) as Record<string, unknown>[];
+    const columns = records.length > 0 ? Object.keys(records[0] as object) : [];
+    const rows = records
+      .slice(0, maxRows)
+      .map((record) =>
+        Object.fromEntries(
+          Object.entries(record).map(([key, value]) => [key, toJsonSafe(value)]),
+        ),
+      );
+
+    return { columns, rows, truncated: records.length > maxRows };
+  } finally {
+    await sql.close({ timeout: 5 });
+    await tunnel.close();
+  }
 }

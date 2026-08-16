@@ -13,6 +13,7 @@ import {
   createS3PresignedDownloadUrl,
   fetchAwsCallerIdentity,
   listS3Buckets,
+  queryRdsInstance,
   searchS3Objects,
 } from "./api";
 
@@ -267,6 +268,77 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
                   text: JSON.stringify({ bucket, key, url }),
                 },
               ],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_rds_instance_query",
+      {
+        title: "Query an RDS database",
+        description:
+          "Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. \"prod-orders-db\") — never by ARN. Reaches it by opening an SSM Session Manager tunnel through a bastion EC2 instance already inside that VPC (no inbound security group rule, public IP, or SSH key needed) — implemented natively against the AWS SDK, no `aws` CLI or `session-manager-plugin` binary required — and authenticates with a short-lived IAM database-auth token instead of a stored password. Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) IAM database authentication turned on for the database, with dbUser granted the matching DB role, (2) a bastion EC2 instance with the SSM Agent, network reachability to the database, and a unique Name tag, (3) the calling AWS profile has ssm:StartSession/ssm:TerminateSession on the bastion. Governor never persists a DB password or uses the RDS Data API, so this works whether or not Data API is enabled. Results are capped at maxRows; the response's `truncated` flag says whether more rows exist.",
+        inputSchema: {
+          name: z
+            .string()
+            .describe(
+              'RDS instance or Aurora cluster identifier as shown in the console, e.g. "prod-orders-db".',
+            ),
+          bastionName: z
+            .string()
+            .describe(
+              "Name tag of the EC2 instance to tunnel through — must have the SSM Agent, network access to the RDS instance, and a unique Name tag.",
+            ),
+          dbUser: z
+            .string()
+            .describe(
+              "Database username configured for IAM authentication (granted rds_iam / the AWS auth plugin) — not a password.",
+            ),
+          database: z.string().describe("Name of the database to query."),
+          sql: z.string().describe("SQL statement to execute."),
+          maxRows: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe("Maximum rows to return (default 200, max 1000)."),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_rds_instance_query",
+        async ({
+          name,
+          bastionName,
+          dbUser,
+          database,
+          sql,
+          maxRows,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await queryRdsInstance(credential, {
+              name,
+              bastionName,
+              dbUser,
+              database,
+              sql,
+              region,
+              maxRows,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
             };
           } catch (err) {
             return toErrorResult(err);
