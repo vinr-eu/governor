@@ -11,9 +11,14 @@ import {
 import type { HttpRouteHandler, ProviderPlugin } from "../plugin";
 import {
   createS3PresignedDownloadUrl,
+  describeDynamoDbTable,
   fetchAwsCallerIdentity,
+  getDynamoDbItem,
+  listDynamoDbTables,
   listS3Buckets,
+  queryDynamoDbTable,
   queryRdsInstance,
+  scanDynamoDbTable,
   searchS3Objects,
 } from "./api";
 
@@ -281,7 +286,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
       {
         title: "Query an RDS database",
         description:
-          "Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. \"prod-orders-db\") — never by ARN. Reaches it by opening an SSM Session Manager tunnel through a bastion EC2 instance already inside that VPC (no inbound security group rule, public IP, or SSH key needed) — implemented natively against the AWS SDK, no `aws` CLI or `session-manager-plugin` binary required — and authenticates with a short-lived IAM database-auth token instead of a stored password. Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) IAM database authentication turned on for the database, with dbUser granted the matching DB role, (2) a bastion EC2 instance with the SSM Agent, network reachability to the database, and a unique Name tag, (3) the calling AWS profile has ssm:StartSession/ssm:TerminateSession on the bastion. Governor never persists a DB password or uses the RDS Data API, so this works whether or not Data API is enabled. Results are capped at maxRows; the response's `truncated` flag says whether more rows exist.",
+          'Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. "prod-orders-db") — never by ARN. Reaches it by opening an SSM Session Manager tunnel through a bastion EC2 instance already inside that VPC (no inbound security group rule, public IP, or SSH key needed) — implemented natively against the AWS SDK, no `aws` CLI or `session-manager-plugin` binary required — and authenticates with a short-lived IAM database-auth token instead of a stored password. Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) IAM database authentication turned on for the database, with dbUser granted the matching DB role, (2) a bastion EC2 instance with the SSM Agent, network reachability to the database, and a unique Name tag, (3) the calling AWS profile has ssm:StartSession/ssm:TerminateSession on the bastion. Governor never persists a DB password or uses the RDS Data API, so this works whether or not Data API is enabled. Results are capped at maxRows; the response\'s `truncated` flag says whether more rows exist.',
         inputSchema: {
           name: z
             .string()
@@ -336,6 +341,249 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
               sql,
               region,
               maxRows,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_dynamodb_list_tables",
+      {
+        title: "List DynamoDB tables",
+        description:
+          "Lists every DynamoDB table visible to a connected AWS profile in a region. Use this to discover table names before describing, querying, or scanning one.",
+        inputSchema: { profile: profileParam, region: regionParam },
+      },
+      withAudit("aws_dynamodb_list_tables", async ({ profile, region }) => {
+        const resolvedProfile = profile ?? DEFAULT_PROFILE;
+        const credential = credentials.get(resolvedProfile);
+        if (!credential) return notConnected(resolvedProfile);
+
+        try {
+          const tables = await listDynamoDbTables(credential, region);
+          return {
+            content: [{ type: "text", text: JSON.stringify({ tables }) }],
+          };
+        } catch (err) {
+          return toErrorResult(err);
+        }
+      }),
+    );
+
+    server.registerTool(
+      "aws_dynamodb_describe_table",
+      {
+        title: "Describe a DynamoDB table",
+        description:
+          "Returns a DynamoDB table's status, item count, size, primary key schema, and global secondary indexes. Use this to learn a table's partition/sort key attribute names before calling aws_dynamodb_query_table.",
+        inputSchema: {
+          tableName: z.string().describe("Name of the DynamoDB table."),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_dynamodb_describe_table",
+        async ({ tableName, profile, region }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const table = await describeDynamoDbTable(
+              credential,
+              tableName,
+              region,
+            );
+            return { content: [{ type: "text", text: JSON.stringify(table) }] };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_dynamodb_get_item",
+      {
+        title: "Get one DynamoDB item by key",
+        description:
+          "Fetches a single item from a DynamoDB table by its exact primary key. Returns null if no item has that key. Use aws_dynamodb_describe_table first if you don't already know the partition/sort key attribute names.",
+        inputSchema: {
+          tableName: z.string().describe("Name of the DynamoDB table."),
+          key: z
+            .record(z.string(), z.unknown())
+            .describe(
+              'Primary key of the item, as plain JSON, e.g. {"userId": "123"} or {"userId": "123", "createdAt": "2024-01-01"} for a composite key.',
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_dynamodb_get_item",
+        async ({ tableName, key, profile, region }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const item = await getDynamoDbItem(
+              credential,
+              tableName,
+              key,
+              region,
+            );
+            return {
+              content: [
+                { type: "text", text: JSON.stringify({ item: item ?? null }) },
+              ],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    const dynamoDbCommonParams = {
+      indexName: z
+        .string()
+        .optional()
+        .describe(
+          "Name of a global/local secondary index to query/scan instead of the table's primary key.",
+        ),
+      filterExpression: z
+        .string()
+        .optional()
+        .describe(
+          'DynamoDB FilterExpression syntax, applied after the read (does not reduce cost, only what\'s returned), e.g. "attr_gt(price, :minPrice)".',
+        ),
+      expressionAttributeNames: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          'Placeholders for attribute names that collide with reserved words, e.g. {"#s": "status"}.',
+        ),
+      expressionAttributeValues: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          'Placeholder values referenced by the key/filter expressions, as plain JSON, e.g. {":status": "active"}.',
+        ),
+      maxItems: z
+        .number()
+        .int()
+        .positive()
+        .max(1000)
+        .optional()
+        .describe("Maximum items to return (default 200, max 1000)."),
+      profile: profileParam,
+      region: regionParam,
+    };
+
+    server.registerTool(
+      "aws_dynamodb_query_table",
+      {
+        title: "Query a DynamoDB table",
+        description:
+          "Runs a DynamoDB Query: efficient lookup of every item sharing a partition key (and optionally a sort-key condition), via keyConditionExpression using standard DynamoDB expression syntax, e.g. \"userId = :uid AND begins_with(createdAt, :prefix)\". Requires knowing the partition key — use aws_dynamodb_scan_table instead when you don't. Paginates internally up to maxItems; the response's `truncated` flag says whether more matching items exist.",
+        inputSchema: {
+          tableName: z.string().describe("Name of the DynamoDB table."),
+          keyConditionExpression: z
+            .string()
+            .describe(
+              'DynamoDB KeyConditionExpression syntax, e.g. "userId = :uid" or "userId = :uid AND createdAt > :since".',
+            ),
+          scanIndexForward: z
+            .boolean()
+            .optional()
+            .describe(
+              "Sort order on the sort key: true (default) for ascending, false for descending.",
+            ),
+          ...dynamoDbCommonParams,
+        },
+      },
+      withAudit(
+        "aws_dynamodb_query_table",
+        async ({
+          tableName,
+          keyConditionExpression,
+          scanIndexForward,
+          indexName,
+          filterExpression,
+          expressionAttributeNames,
+          expressionAttributeValues,
+          maxItems,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await queryDynamoDbTable(credential, tableName, {
+              keyConditionExpression,
+              scanIndexForward,
+              indexName,
+              filterExpression,
+              expressionAttributeNames,
+              expressionAttributeValues,
+              maxItems,
+              region,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_dynamodb_scan_table",
+      {
+        title: "Scan a DynamoDB table",
+        description:
+          "Runs a DynamoDB Scan: reads across the whole table/index rather than one partition, optionally narrowed by filterExpression (applied after the read). Slower and more expensive than aws_dynamodb_query_table — prefer that when the partition key is known. Paginates internally up to maxItems; the response's `truncated` flag says whether more items exist.",
+        inputSchema: {
+          tableName: z.string().describe("Name of the DynamoDB table."),
+          ...dynamoDbCommonParams,
+        },
+      },
+      withAudit(
+        "aws_dynamodb_scan_table",
+        async ({
+          tableName,
+          indexName,
+          filterExpression,
+          expressionAttributeNames,
+          expressionAttributeValues,
+          maxItems,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await scanDynamoDbTable(credential, tableName, {
+              indexName,
+              filterExpression,
+              expressionAttributeNames,
+              expressionAttributeValues,
+              maxItems,
+              region,
             });
             return {
               content: [{ type: "text", text: JSON.stringify(result) }],

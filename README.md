@@ -53,7 +53,7 @@ exfiltrate. An agent that fully controls the calling shell can still only reach 
 is the whole point.
 
 This is also why governor doesn't use the OS keychain (macOS Keychain, Linux Secret Service, Windows DPAPI): all three
-gate access by OS *user*, not by *calling process* — a shell an agent controls can read them exactly as easily as
+gate access by OS _user_, not by _calling process_ — a shell an agent controls can read them exactly as easily as
 governor can. We verified this empirically before ruling it out.
 
 What governor deliberately does **not** do: run as a separate OS service/service-account to sandbox itself from the
@@ -94,7 +94,7 @@ bun run build          # -> ./dist/governor
 ## CLI reference
 
 | Command                     | Description                                                                                                                                                     |
-|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `governor init`             | Create the encrypted vault and set the master password.                                                                                                         |
 | `governor setup <provider>` | Store credentials for a provider. `--profile <name>` to use a named profile (default `"default"`); `--list` to list configured profiles.                        |
 | `governor rotate-password`  | Re-encrypt the vault under a new master password — the standard remediation if the old one may be compromised. Also upgrades the vault's KDF params to current. |
@@ -115,18 +115,24 @@ Auth method: access key (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) — chos
 
 MCP tools:
 
-| Tool                      | Does                                                                                                                           |
-|---------------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `aws_list_profiles`       | Lists AWS profiles connected to this governor instance.                                                                        |
-| `aws_get_caller_identity` | STS `GetCallerIdentity` for a profile — account id, ARN, user id.                                                              |
-| `aws_s3_list_buckets`     | Lists every S3 bucket visible to a profile, with region and creation date.                                                     |
-| `aws_s3_search_objects`   | Lists/searches objects in a bucket by prefix and/or substring — key, size, last-modified, etag. Never returns object contents. |
-| `aws_s3_get_download_url` | Returns a time-limited, read-only presigned download URL for one object — never the bytes or credentials.                      |
+| Tool                          | Does                                                                                                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aws_list_profiles`           | Lists AWS profiles connected to this governor instance.                                                                                                         |
+| `aws_get_caller_identity`     | STS `GetCallerIdentity` for a profile — account id, ARN, user id.                                                                                               |
+| `aws_s3_list_buckets`         | Lists every S3 bucket visible to a profile, with region and creation date.                                                                                      |
+| `aws_s3_search_objects`       | Lists/searches objects in a bucket by prefix and/or substring — key, size, last-modified, etag. Never returns object contents.                                  |
+| `aws_s3_get_download_url`     | Returns a time-limited, read-only presigned download URL for one object — never the bytes or credentials.                                                       |
+| `aws_rds_instance_query`      | Runs one SQL statement against an RDS/Aurora database over an SSM tunnel through a bastion, authenticated with a short-lived IAM DB token — no stored password. |
+| `aws_dynamodb_list_tables`    | Lists every DynamoDB table visible to a profile in a region.                                                                                                    |
+| `aws_dynamodb_describe_table` | Table status, item count, size, primary key schema, and global secondary indexes.                                                                               |
+| `aws_dynamodb_get_item`       | Fetches a single item by its exact primary key.                                                                                                                 |
+| `aws_dynamodb_query_table`    | Runs a DynamoDB Query (partition key, optional sort-key condition/index/filter) — paginates internally up to `maxItems`.                                        |
+| `aws_dynamodb_scan_table`     | Runs a DynamoDB Scan across a table/index with an optional filter — use only when the partition key isn't known.                                                |
 
 REST:
 
 | Route                                  | Does                                       |
-|----------------------------------------|--------------------------------------------|
+| -------------------------------------- | ------------------------------------------ |
 | `GET /providers/aws/identity`          | Caller identity for the `default` profile. |
 | `GET /providers/aws/:profile/identity` | Caller identity for a named profile.       |
 

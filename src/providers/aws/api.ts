@@ -14,6 +14,17 @@ import {
 } from "@aws-sdk/client-rds";
 import { DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { Signer } from "@aws-sdk/rds-signer";
+import {
+  DescribeTableCommand,
+  DynamoDBClient,
+  ListTablesCommand,
+} from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  QueryCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { SQL } from "bun";
 import type { AccessKeyCredential } from "../credentials";
 import { openSsmPortForwardTunnel } from "./ssm-tunnel";
@@ -242,8 +253,10 @@ function adapterForEngine(engine: string): "postgres" | "mysql" | undefined {
 }
 
 function isNotFoundError(err: unknown): boolean {
-  return typeof (err as { name?: string })?.name === "string" &&
-    (err as { name: string }).name.includes("NotFound");
+  return (
+    typeof (err as { name?: string })?.name === "string" &&
+    (err as { name: string }).name.includes("NotFound")
+  );
 }
 
 /**
@@ -271,7 +284,11 @@ async function resolveRdsEndpoint(
           `RDS instance "${name}" uses engine "${instance.Engine}", which isn't supported — only Postgres- and MySQL-compatible engines are.`,
         );
       }
-      return { host: instance.Endpoint.Address, port: instance.Endpoint.Port, adapter };
+      return {
+        host: instance.Endpoint.Address,
+        port: instance.Endpoint.Port,
+        adapter,
+      };
     }
   } catch (err) {
     if (!isNotFoundError(err)) throw err;
@@ -314,7 +331,9 @@ async function resolveBastionInstanceId(
       ],
     }),
   );
-  const instances = (result.Reservations ?? []).flatMap((r) => r.Instances ?? []);
+  const instances = (result.Reservations ?? []).flatMap(
+    (r) => r.Instances ?? [],
+  );
   if (instances.length === 0) {
     throw new Error(
       `No running EC2 instance named "${bastionName}" was found in region ${region}.`,
@@ -407,13 +426,19 @@ export async function queryRdsInstance(
   });
 
   try {
-    const records = (await sql.unsafe(options.sql)) as Record<string, unknown>[];
+    const records = (await sql.unsafe(options.sql)) as Record<
+      string,
+      unknown
+    >[];
     const columns = records.length > 0 ? Object.keys(records[0] as object) : [];
     const rows = records
       .slice(0, maxRows)
       .map((record) =>
         Object.fromEntries(
-          Object.entries(record).map(([key, value]) => [key, toJsonSafe(value)]),
+          Object.entries(record).map(([key, value]) => [
+            key,
+            toJsonSafe(value),
+          ]),
         ),
       );
 
@@ -422,4 +447,233 @@ export async function queryRdsInstance(
     await sql.close({ timeout: 5 });
     await tunnel.close();
   }
+}
+
+// DynamoDB tools are read-only (list/describe/get/query/scan) — unlike the
+// RDS tool above, there's no arbitrary-statement escape hatch, since a
+// single item-level PutItem/UpdateItem/DeleteItem call has no equivalent
+// blast-radius guard the way a bounded SELECT does.
+
+function dynamoDbClient(
+  credential: AccessKeyCredential,
+  region?: string,
+): DynamoDBDocumentClient {
+  const client = new DynamoDBClient({
+    region: region ?? process.env.AWS_REGION ?? "us-east-1",
+    credentials: credential,
+  });
+  return DynamoDBDocumentClient.from(client, {
+    marshallOptions: { removeUndefinedValues: true },
+  });
+}
+
+export async function listDynamoDbTables(
+  credential: AccessKeyCredential,
+  region?: string,
+): Promise<string[]> {
+  const ddb = dynamoDbClient(credential, region);
+  const tables: string[] = [];
+  let exclusiveStartTableName: string | undefined;
+
+  do {
+    const page = await ddb.send(
+      new ListTablesCommand({
+        ExclusiveStartTableName: exclusiveStartTableName,
+      }),
+    );
+    tables.push(...(page.TableNames ?? []));
+    exclusiveStartTableName = page.LastEvaluatedTableName;
+  } while (exclusiveStartTableName);
+
+  return tables;
+}
+
+export interface DynamoDbKeyElement {
+  attributeName: string;
+  keyType: "HASH" | "RANGE";
+}
+
+export interface DynamoDbTableDescription {
+  name: string;
+  status?: string;
+  itemCount?: number;
+  sizeBytes?: number;
+  keySchema: DynamoDbKeyElement[];
+  globalSecondaryIndexes: { name: string; keySchema: DynamoDbKeyElement[] }[];
+}
+
+export async function describeDynamoDbTable(
+  credential: AccessKeyCredential,
+  tableName: string,
+  region?: string,
+): Promise<DynamoDbTableDescription> {
+  const ddb = dynamoDbClient(credential, region);
+  const result = await ddb.send(
+    new DescribeTableCommand({ TableName: tableName }),
+  );
+  const table = result.Table;
+  if (!table) {
+    throw new Error(`No DynamoDB table named "${tableName}" was found.`);
+  }
+
+  const toKeySchema = (
+    schema?: { AttributeName?: string; KeyType?: string }[],
+  ): DynamoDbKeyElement[] =>
+    (schema ?? [])
+      .filter((k) => k.AttributeName && k.KeyType)
+      .map((k) => ({
+        attributeName: k.AttributeName as string,
+        keyType: k.KeyType as "HASH" | "RANGE",
+      }));
+
+  return {
+    name: tableName,
+    status: table.TableStatus,
+    itemCount: table.ItemCount,
+    sizeBytes: table.TableSizeBytes,
+    keySchema: toKeySchema(table.KeySchema),
+    globalSecondaryIndexes: (table.GlobalSecondaryIndexes ?? []).map((gsi) => ({
+      name: gsi.IndexName ?? "",
+      keySchema: toKeySchema(gsi.KeySchema),
+    })),
+  };
+}
+
+export async function getDynamoDbItem(
+  credential: AccessKeyCredential,
+  tableName: string,
+  key: Record<string, unknown>,
+  region?: string,
+): Promise<Record<string, unknown> | undefined> {
+  const ddb = dynamoDbClient(credential, region);
+  const result = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: key }),
+  );
+  return result.Item;
+}
+
+export interface DynamoDbQueryOptions {
+  region?: string;
+  indexName?: string;
+  keyConditionExpression: string;
+  filterExpression?: string;
+  expressionAttributeNames?: Record<string, string>;
+  expressionAttributeValues?: Record<string, unknown>;
+  scanIndexForward?: boolean;
+  maxItems?: number;
+}
+
+export interface DynamoDbItemsResult {
+  items: Record<string, unknown>[];
+  truncated: boolean;
+}
+
+const DEFAULT_DYNAMODB_MAX_ITEMS = 200;
+const MAX_DYNAMODB_MAX_ITEMS = 1000;
+
+/**
+ * Runs a DynamoDB Query — requires a partition-key equality condition (and
+ * optionally a sort-key condition) via `keyConditionExpression`, the same
+ * expression syntax the AWS SDK/console use. Paginates internally until
+ * `maxItems` is filled or the table/index is exhausted; `truncated` says
+ * whether more matching items exist beyond the cap.
+ */
+export async function queryDynamoDbTable(
+  credential: AccessKeyCredential,
+  tableName: string,
+  options: DynamoDbQueryOptions,
+): Promise<DynamoDbItemsResult> {
+  const maxItems = Math.min(
+    options.maxItems ?? DEFAULT_DYNAMODB_MAX_ITEMS,
+    MAX_DYNAMODB_MAX_ITEMS,
+  );
+  const ddb = dynamoDbClient(credential, options.region);
+
+  const items: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  let truncated = false;
+
+  do {
+    const page = await ddb.send(
+      new QueryCommand({
+        TableName: tableName,
+        IndexName: options.indexName,
+        KeyConditionExpression: options.keyConditionExpression,
+        FilterExpression: options.filterExpression,
+        ExpressionAttributeNames: options.expressionAttributeNames,
+        ExpressionAttributeValues: options.expressionAttributeValues,
+        ScanIndexForward: options.scanIndexForward,
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      if (items.length >= maxItems) {
+        truncated = true;
+        break;
+      }
+      items.push(item);
+    }
+    exclusiveStartKey =
+      items.length < maxItems ? page.LastEvaluatedKey : undefined;
+    if (page.LastEvaluatedKey && items.length >= maxItems) truncated = true;
+  } while (exclusiveStartKey);
+
+  return { items, truncated };
+}
+
+export interface DynamoDbScanOptions {
+  region?: string;
+  indexName?: string;
+  filterExpression?: string;
+  expressionAttributeNames?: Record<string, string>;
+  expressionAttributeValues?: Record<string, unknown>;
+  maxItems?: number;
+}
+
+/**
+ * Runs a DynamoDB Scan — reads the whole table/index rather than a single
+ * partition, narrowed only after the fact by an optional `filterExpression`.
+ * Use `queryDynamoDbTable` instead whenever the partition key is known;
+ * reach for this when it isn't (the DynamoDB analog of `aws_s3_search_objects`
+ * scanning a bucket by substring rather than a known key).
+ */
+export async function scanDynamoDbTable(
+  credential: AccessKeyCredential,
+  tableName: string,
+  options: DynamoDbScanOptions = {},
+): Promise<DynamoDbItemsResult> {
+  const maxItems = Math.min(
+    options.maxItems ?? DEFAULT_DYNAMODB_MAX_ITEMS,
+    MAX_DYNAMODB_MAX_ITEMS,
+  );
+  const ddb = dynamoDbClient(credential, options.region);
+
+  const items: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  let truncated = false;
+
+  do {
+    const page = await ddb.send(
+      new ScanCommand({
+        TableName: tableName,
+        IndexName: options.indexName,
+        FilterExpression: options.filterExpression,
+        ExpressionAttributeNames: options.expressionAttributeNames,
+        ExpressionAttributeValues: options.expressionAttributeValues,
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      if (items.length >= maxItems) {
+        truncated = true;
+        break;
+      }
+      items.push(item);
+    }
+    exclusiveStartKey =
+      items.length < maxItems ? page.LastEvaluatedKey : undefined;
+    if (page.LastEvaluatedKey && items.length >= maxItems) truncated = true;
+  } while (exclusiveStartKey);
+
+  return { items, truncated };
 }
