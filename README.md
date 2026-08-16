@@ -128,6 +128,8 @@ MCP tools:
 | `aws_dynamodb_get_item`       | Fetches a single item by its exact primary key.                                                                                                                 |
 | `aws_dynamodb_query_table`    | Runs a DynamoDB Query (partition key, optional sort-key condition/index/filter) — paginates internally up to `maxItems`.                                        |
 | `aws_dynamodb_scan_table`     | Runs a DynamoDB Scan across a table/index with an optional filter — use only when the partition key isn't known.                                                |
+| `aws_logs_list_groups`        | Lists CloudWatch Logs log groups visible to a profile in a region, with retention and stored size.                                                             |
+| `aws_logs_search`             | Searches a CloudWatch log group by filter pattern across all its streams, ordered by time, within a time range (default: last hour).                          |
 
 REST:
 

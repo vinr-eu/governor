@@ -14,11 +14,13 @@ import {
   describeDynamoDbTable,
   fetchAwsCallerIdentity,
   getDynamoDbItem,
+  listCloudWatchLogGroups,
   listDynamoDbTables,
   listS3Buckets,
   queryDynamoDbTable,
   queryRdsInstance,
   scanDynamoDbTable,
+  searchCloudWatchLogs,
   searchS3Objects,
 } from "./api";
 
@@ -585,6 +587,151 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
               maxItems,
               region,
             });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_logs_list_groups",
+      {
+        title: "List CloudWatch log groups",
+        description:
+          "Lists CloudWatch Logs log groups visible to a connected AWS profile in a region, with retention period and stored size. Narrow with `prefix` (server-side, cheap). Use this to find a log group's exact name before searching it with aws_logs_search.",
+        inputSchema: {
+          prefix: z
+            .string()
+            .optional()
+            .describe(
+              "Only include log groups whose name starts with this prefix.",
+            ),
+          maxResults: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe(
+              "Maximum number of log groups to return (default 200, max 1000).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_logs_list_groups",
+        async ({ prefix, maxResults, profile, region }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const groups = await listCloudWatchLogGroups(credential, {
+              region,
+              prefix,
+              maxResults,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify({ groups }) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_logs_search",
+      {
+        title: "Search CloudWatch logs",
+        description:
+          "Searches a CloudWatch log group for events across every log stream in the group, ordered by time — the read path for debugging and incident response. Two modes, via `order`: \"asc\" (default) runs a forward FilterLogEvents scan matching `filterPattern` within a time range — `startTime`/`endTime` are ISO 8601 timestamps, startTime defaults to 1 hour before endTime (endTime defaults to now) so an omitted range never scans a group's full retention window. \"desc\" is tail mode — the most recent events regardless of how old they turn out to be, resolved directly from the group's most-recently-active streams rather than scanning forward to find them, so it stays cheap even when the last write was long ago; it doesn't support filterPattern (CloudWatch has no server-side filter on that read path) and only considers a bounded number of the most recently active streams. Paginates internally up to maxResults; the response's `truncated` flag says whether more matching events exist.",
+        inputSchema: {
+          logGroupName: z
+            .string()
+            .describe(
+              'Exact name of the CloudWatch log group to search, e.g. "/aws/lambda/my-function". Use aws_logs_list_groups to find it.',
+            ),
+          order: z
+            .enum(["asc", "desc"])
+            .optional()
+            .describe(
+              '"asc" (default): forward scan matching filterPattern within startTime/endTime. "desc": tail mode — most recent events first-found, regardless of age; no filterPattern support.',
+            ),
+          filterPattern: z
+            .string()
+            .optional()
+            .describe(
+              'CloudWatch Logs filter pattern, e.g. "ERROR" or "?ERROR ?WARN". Omit to match every event. Only valid with order "asc".',
+            ),
+          logStreamNamePrefix: z
+            .string()
+            .optional()
+            .describe(
+              "Only search log streams whose name starts with this prefix.",
+            ),
+          startTime: z
+            .string()
+            .optional()
+            .describe(
+              'ISO 8601 timestamp to search from. In order "asc", defaults to 1 hour before endTime; in order "desc", an optional lower bound (no default).',
+            ),
+          endTime: z
+            .string()
+            .optional()
+            .describe(
+              'ISO 8601 timestamp to search until. In order "asc", defaults to now; in order "desc", an optional upper bound (no default — omit to tail all the way to the latest event).',
+            ),
+          maxResults: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe(
+              "Maximum number of log events to return (default 200, max 1000).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_logs_search",
+        async ({
+          logGroupName,
+          order,
+          filterPattern,
+          logStreamNamePrefix,
+          startTime,
+          endTime,
+          maxResults,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await searchCloudWatchLogs(
+              credential,
+              logGroupName,
+              {
+                region,
+                order,
+                filterPattern,
+                logStreamNamePrefix,
+                startTime,
+                endTime,
+                maxResults,
+              },
+            );
             return {
               content: [{ type: "text", text: JSON.stringify(result) }],
             };

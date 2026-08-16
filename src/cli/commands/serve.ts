@@ -201,7 +201,16 @@ export async function runServe(args: string[]) {
     hostname: host,
     routes: {
       "/health": () => Response.json({ status: "ok" }),
-      "/mcp": async (req) => {
+      "/mcp": async (req, server) => {
+        // Bun closes a connection that's gone quiet for 10s (the default
+        // idleTimeout), measured from the last byte sent — not from request
+        // start. The MCP transport flushes SSE headers immediately but
+        // doesn't write the actual response until the tool call resolves,
+        // so any tool slower than that (a big RDS query, a wide DynamoDB
+        // scan, aws_logs_search order="desc" falling back to its
+        // expanding scan) would otherwise get its connection killed
+        // mid-response with no error, just a truncated stream.
+        server.timeout(req, 0);
         const unauthorized = requireAuth(req, mcpToken);
         return unauthorized ?? handleMcp(req, credentialsByProvider);
       },

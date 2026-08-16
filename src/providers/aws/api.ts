@@ -13,6 +13,13 @@ import {
   RDSClient,
 } from "@aws-sdk/client-rds";
 import { DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
+import {
+  CloudWatchLogsClient,
+  DescribeLogGroupsCommand,
+  DescribeLogStreamsCommand,
+  FilterLogEventsCommand,
+  GetLogEventsCommand,
+} from "@aws-sdk/client-cloudwatch-logs";
 import { Signer } from "@aws-sdk/rds-signer";
 import {
   DescribeTableCommand,
@@ -676,4 +683,437 @@ export async function scanDynamoDbTable(
   } while (exclusiveStartKey);
 
   return { items, truncated };
+}
+
+function cloudWatchLogsClient(
+  credential: AccessKeyCredential,
+  region?: string,
+): CloudWatchLogsClient {
+  return new CloudWatchLogsClient({
+    region: region ?? process.env.AWS_REGION ?? "us-east-1",
+    credentials: credential,
+  });
+}
+
+export interface LogGroupSummary {
+  name: string;
+  storedBytes?: number;
+  retentionInDays?: number;
+  creationTime?: string;
+}
+
+const DEFAULT_LOG_GROUPS_MAX_RESULTS = 200;
+const MAX_LOG_GROUPS_MAX_RESULTS = 1000;
+
+export async function listCloudWatchLogGroups(
+  credential: AccessKeyCredential,
+  options: { region?: string; prefix?: string; maxResults?: number } = {},
+): Promise<LogGroupSummary[]> {
+  const maxResults = Math.min(
+    options.maxResults ?? DEFAULT_LOG_GROUPS_MAX_RESULTS,
+    MAX_LOG_GROUPS_MAX_RESULTS,
+  );
+  const logs = cloudWatchLogsClient(credential, options.region);
+
+  const groups: LogGroupSummary[] = [];
+  let nextToken: string | undefined;
+
+  do {
+    const page = await logs.send(
+      new DescribeLogGroupsCommand({
+        logGroupNamePrefix: options.prefix,
+        nextToken,
+      }),
+    );
+    for (const group of page.logGroups ?? []) {
+      if (!group.logGroupName) continue;
+      groups.push({
+        name: group.logGroupName,
+        storedBytes: group.storedBytes,
+        retentionInDays: group.retentionInDays,
+        creationTime:
+          group.creationTime !== undefined
+            ? new Date(group.creationTime).toISOString()
+            : undefined,
+      });
+      if (groups.length >= maxResults) break;
+    }
+    nextToken = groups.length < maxResults ? page.nextToken : undefined;
+  } while (nextToken);
+
+  return groups;
+}
+
+export interface LogEvent {
+  timestamp?: string;
+  message?: string;
+  logStreamName?: string;
+}
+
+export interface LogSearchResult {
+  events: LogEvent[];
+  truncated: boolean;
+}
+
+const DEFAULT_LOG_SEARCH_MAX_RESULTS = 200;
+const MAX_LOG_SEARCH_MAX_RESULTS = 1000;
+const DEFAULT_LOG_SEARCH_LOOKBACK_MS = 60 * 60 * 1000;
+
+/**
+ * Runs CloudWatch Logs FilterLogEvents against one log group — the read path
+ * for debugging/incident response, since it searches across every log
+ * stream in the group ordered by time rather than requiring a specific
+ * stream name up front. `startTime`/`endTime` default to the last hour
+ * ending now, so an omitted range can't accidentally scan a group's entire
+ * retention window. Paginates internally until `maxResults` is filled or the
+ * range is exhausted; `truncated` says whether more matching events exist.
+ *
+ * `order: "desc"` switches to tail mode (see `tailCloudWatchLogs` below)
+ * instead of this forward scan — it doesn't support `filterPattern` and
+ * ignores the default 1-hour lookback, since its cost doesn't scale with
+ * how far back it has to look the way a forward scan's does.
+ */
+export async function searchCloudWatchLogs(
+  credential: AccessKeyCredential,
+  logGroupName: string,
+  options: {
+    region?: string;
+    filterPattern?: string;
+    logStreamNamePrefix?: string;
+    startTime?: string;
+    endTime?: string;
+    maxResults?: number;
+    order?: "asc" | "desc";
+  } = {},
+): Promise<LogSearchResult> {
+  const maxResults = Math.min(
+    options.maxResults ?? DEFAULT_LOG_SEARCH_MAX_RESULTS,
+    MAX_LOG_SEARCH_MAX_RESULTS,
+  );
+
+  if (options.order === "desc") {
+    if (options.filterPattern) {
+      throw new Error(
+        'order "desc" (tail mode) can\'t be combined with filterPattern — CloudWatch\'s tail read (GetLogEvents) has no server-side filter, only FilterLogEvents does. Drop filterPattern, or use order "asc" with an explicit time range instead.',
+      );
+    }
+    return tailCloudWatchLogs(credential, logGroupName, {
+      region: options.region,
+      logStreamNamePrefix: options.logStreamNamePrefix,
+      startTime: options.startTime,
+      endTime: options.endTime,
+      maxResults,
+    });
+  }
+
+  const endTime = options.endTime ? Date.parse(options.endTime) : Date.now();
+  if (Number.isNaN(endTime)) {
+    throw new Error(`Invalid endTime: "${options.endTime}"`);
+  }
+  const startTime = options.startTime
+    ? Date.parse(options.startTime)
+    : endTime - DEFAULT_LOG_SEARCH_LOOKBACK_MS;
+  if (Number.isNaN(startTime)) {
+    throw new Error(`Invalid startTime: "${options.startTime}"`);
+  }
+
+  const logs = cloudWatchLogsClient(credential, options.region);
+
+  const events: LogEvent[] = [];
+  let nextToken: string | undefined;
+  let truncated = false;
+
+  do {
+    const page = await logs.send(
+      new FilterLogEventsCommand({
+        logGroupName,
+        logStreamNamePrefix: options.logStreamNamePrefix,
+        filterPattern: options.filterPattern,
+        startTime,
+        endTime,
+        nextToken,
+        limit: Math.max(1, maxResults - events.length),
+      }),
+    );
+    for (const event of page.events ?? []) {
+      if (events.length >= maxResults) {
+        truncated = true;
+        break;
+      }
+      events.push({
+        timestamp:
+          event.timestamp !== undefined
+            ? new Date(event.timestamp).toISOString()
+            : undefined,
+        message: event.message,
+        logStreamName: event.logStreamName,
+      });
+    }
+    nextToken = events.length < maxResults ? page.nextToken : undefined;
+    if (page.nextToken && events.length >= maxResults) truncated = true;
+  } while (nextToken);
+
+  return { events, truncated };
+}
+
+const TAIL_STREAM_FAN_OUT_CAP = 20;
+const TAIL_STREAM_PREFIX_SCAN_CAP = 250;
+
+/**
+ * Finds the log group's most-recently-active streams — the ones tail mode
+ * needs to read from. `DescribeLogStreams` can sort by `LastEventTime`
+ * directly, which is exactly this ordering, but AWS doesn't let that be
+ * combined with `logStreamNamePrefix` in the same call. So when narrowing by
+ * stream name, this instead pages through matching streams (bounded by
+ * `TAIL_STREAM_PREFIX_SCAN_CAP`) and sorts by recency itself.
+ */
+async function mostRecentlyActiveLogStreams(
+  logs: CloudWatchLogsClient,
+  logGroupName: string,
+  options: { logStreamNamePrefix?: string; fanOut: number },
+): Promise<string[]> {
+  if (!options.logStreamNamePrefix) {
+    const page = await logs.send(
+      new DescribeLogStreamsCommand({
+        logGroupName,
+        orderBy: "LastEventTime",
+        descending: true,
+        limit: options.fanOut,
+      }),
+    );
+    return (page.logStreams ?? [])
+      .filter((stream) => stream.logStreamName)
+      .map((stream) => stream.logStreamName as string);
+  }
+
+  const candidates: { name: string; lastEventTimestamp: number }[] = [];
+  let nextToken: string | undefined;
+  do {
+    const page = await logs.send(
+      new DescribeLogStreamsCommand({
+        logGroupName,
+        logStreamNamePrefix: options.logStreamNamePrefix,
+        nextToken,
+        limit: 50,
+      }),
+    );
+    for (const stream of page.logStreams ?? []) {
+      if (!stream.logStreamName) continue;
+      candidates.push({
+        name: stream.logStreamName,
+        lastEventTimestamp: stream.lastEventTimestamp ?? -Infinity,
+      });
+    }
+    nextToken =
+      candidates.length < TAIL_STREAM_PREFIX_SCAN_CAP
+        ? page.nextToken
+        : undefined;
+  } while (nextToken);
+
+  candidates.sort((a, b) => b.lastEventTimestamp - a.lastEventTimestamp);
+  return candidates.slice(0, options.fanOut).map((candidate) => candidate.name);
+}
+
+interface RawTailEvent {
+  timestampMs: number;
+  message?: string;
+  logStreamName: string;
+}
+
+function toTailResult(
+  events: RawTailEvent[],
+  maxResults: number,
+): LogSearchResult {
+  events.sort((a, b) => a.timestampMs - b.timestampMs);
+  const tail = events.slice(-maxResults).map((event) => ({
+    timestamp: new Date(event.timestampMs).toISOString(),
+    message: event.message,
+    logStreamName: event.logStreamName,
+  }));
+  return { events: tail, truncated: events.length > maxResults };
+}
+
+/**
+ * Reads each of `streamNames` backward from its tail via
+ * GetLogEvents(startFromHead: false) and merges the results. Cost is
+ * bounded by streamNames.length × maxResults regardless of how old the
+ * matching events turn out to be — the fast path when the streams are
+ * actually still listed (see the fallback below for when they aren't).
+ */
+async function tailKnownLogStreams(
+  logs: CloudWatchLogsClient,
+  logGroupName: string,
+  streamNames: string[],
+  options: { startTime?: number; endTime?: number; maxResults: number },
+): Promise<RawTailEvent[]> {
+  const streamPages = await Promise.all(
+    streamNames.map((logStreamName) =>
+      logs.send(
+        new GetLogEventsCommand({
+          logGroupName,
+          logStreamName,
+          startFromHead: false,
+          startTime: options.startTime,
+          endTime: options.endTime,
+          limit: options.maxResults,
+        }),
+      ),
+    ),
+  );
+
+  const events: RawTailEvent[] = [];
+  streamPages.forEach((page, i) => {
+    for (const event of page.events ?? []) {
+      if (event.timestamp === undefined) continue;
+      events.push({
+        timestampMs: event.timestamp,
+        message: event.message,
+        logStreamName: streamNames[i] as string,
+      });
+    }
+  });
+  return events;
+}
+
+const TAIL_SCAN_INITIAL_WINDOW_MS = 15 * 60 * 1000;
+const TAIL_SCAN_MAX_DOUBLINGS = 20;
+const TAIL_SCAN_PER_WINDOW_EVENT_CAP = 2000;
+
+/**
+ * Fallback tail strategy for when DescribeLogStreams comes back empty even
+ * though the group demonstrably has events — CloudWatch stops listing a
+ * stream via DescribeLogStreams some time after its last write, while
+ * FilterLogEvents can still retrieve its events for as long as the group's
+ * retention keeps them. (Confirmed empirically: a group whose last write was
+ * over a year ago returned zero streams from DescribeLogStreams but real
+ * events from FilterLogEvents.) This instead runs FilterLogEvents over a
+ * window anchored at `endTime`/now, doubling the window backward
+ * (15m, 30m, 1h, ...) until it collects `maxResults` events or hits
+ * `startTime`/`TAIL_SCAN_MAX_DOUBLINGS` — cheap when the tail is recent,
+ * more expensive the further back it turns out to be, unlike the
+ * stream-based path whose cost doesn't depend on age at all.
+ */
+async function tailViaExpandingScan(
+  logs: CloudWatchLogsClient,
+  logGroupName: string,
+  options: {
+    logStreamNamePrefix?: string;
+    startTime?: number;
+    endTime?: number;
+    maxResults: number;
+  },
+): Promise<RawTailEvent[]> {
+  const anchorEnd = options.endTime ?? Date.now();
+  let windowMs = TAIL_SCAN_INITIAL_WINDOW_MS;
+  let events: RawTailEvent[] = [];
+
+  for (let attempt = 0; attempt < TAIL_SCAN_MAX_DOUBLINGS; attempt++) {
+    const windowStart =
+      options.startTime !== undefined
+        ? Math.max(options.startTime, anchorEnd - windowMs)
+        : anchorEnd - windowMs;
+
+    events = [];
+    let nextToken: string | undefined;
+    do {
+      const page = await logs.send(
+        new FilterLogEventsCommand({
+          logGroupName,
+          logStreamNamePrefix: options.logStreamNamePrefix,
+          startTime: windowStart,
+          endTime: anchorEnd,
+          nextToken,
+        }),
+      );
+      for (const event of page.events ?? []) {
+        if (event.timestamp === undefined) continue;
+        events.push({
+          timestampMs: event.timestamp,
+          message: event.message,
+          logStreamName: event.logStreamName ?? "",
+        });
+      }
+      nextToken =
+        events.length < TAIL_SCAN_PER_WINDOW_EVENT_CAP
+          ? page.nextToken
+          : undefined;
+    } while (nextToken);
+
+    if (events.length >= options.maxResults) break;
+    if (options.startTime !== undefined && windowStart <= options.startTime) {
+      break;
+    }
+    windowMs *= 2;
+  }
+
+  return events;
+}
+
+/**
+ * Tails a log group: its most recent events, oldest-first, without needing
+ * to know how far back they actually are. Unlike the forward scan above
+ * (FilterLogEvents has no reverse mode), this first tries the group's
+ * most-recently-active streams via DescribeLogStreams and reads each one
+ * backward with GetLogEvents(startFromHead: false) — see
+ * `tailKnownLogStreams`. If that comes back empty, it falls back to
+ * `tailViaExpandingScan`, since DescribeLogStreams is known to stop listing
+ * streams some time after their last write even while their events remain
+ * queryable.
+ *
+ * Tradeoffs either path inherits: no `filterPattern` (neither GetLogEvents
+ * nor this fallback's per-window scan filters server-side — the fallback
+ * could in principle, but doesn't yet), and the stream-based path only
+ * considers the `fanOut` most recently active streams — fine for the common
+ * case of a handful of active streams, but an event sitting in a stream
+ * outside that set won't surface there (the fallback, when it triggers,
+ * doesn't have this gap since it reads the group directly).
+ */
+async function tailCloudWatchLogs(
+  credential: AccessKeyCredential,
+  logGroupName: string,
+  options: {
+    region?: string;
+    logStreamNamePrefix?: string;
+    startTime?: string;
+    endTime?: string;
+    maxResults: number;
+  },
+): Promise<LogSearchResult> {
+  const startTime = options.startTime
+    ? Date.parse(options.startTime)
+    : undefined;
+  if (options.startTime && Number.isNaN(startTime)) {
+    throw new Error(`Invalid startTime: "${options.startTime}"`);
+  }
+  const endTime = options.endTime ? Date.parse(options.endTime) : undefined;
+  if (options.endTime && Number.isNaN(endTime)) {
+    throw new Error(`Invalid endTime: "${options.endTime}"`);
+  }
+
+  const logs = cloudWatchLogsClient(credential, options.region);
+  const fanOut = Math.min(options.maxResults, TAIL_STREAM_FAN_OUT_CAP);
+  const streamNames = await mostRecentlyActiveLogStreams(logs, logGroupName, {
+    logStreamNamePrefix: options.logStreamNamePrefix,
+    fanOut,
+  });
+
+  let events =
+    streamNames.length > 0
+      ? await tailKnownLogStreams(logs, logGroupName, streamNames, {
+          startTime,
+          endTime,
+          maxResults: options.maxResults,
+        })
+      : [];
+
+  if (events.length === 0) {
+    events = await tailViaExpandingScan(logs, logGroupName, {
+      logStreamNamePrefix: options.logStreamNamePrefix,
+      startTime,
+      endTime,
+      maxResults: options.maxResults,
+    });
+  }
+
+  return toTailResult(events, options.maxResults);
 }
