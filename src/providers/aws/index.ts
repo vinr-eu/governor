@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Vault } from "../../cli/lib/vault";
+import { withAudit } from "../../mcp/audit";
 import {
   DEFAULT_PROFILE,
   loadAccessKeyCredentials,
@@ -58,14 +59,14 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
           "Lists the AWS profile names currently connected to this governor instance (set up via `governor setup aws --profile <name>`).",
         inputSchema: {},
       },
-      async () => ({
+      withAudit("aws_list_profiles", async () => ({
         content: [
           {
             type: "text",
             text: JSON.stringify({ profiles: [...credentials.keys()] }),
           },
         ],
-      }),
+      })),
     );
 
     server.registerTool(
@@ -81,7 +82,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
             .describe(`Profile name to use. Defaults to "${DEFAULT_PROFILE}".`),
         },
       },
-      async ({ profile }) => {
+      withAudit("aws_get_caller_identity", async ({ profile }) => {
         const resolvedProfile = profile ?? DEFAULT_PROFILE;
         const credential = credentials.get(resolvedProfile);
         if (!credential) {
@@ -117,7 +118,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
             ],
           };
         }
-      },
+      }),
     );
   },
 

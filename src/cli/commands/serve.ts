@@ -125,6 +125,11 @@ function requireAuth(req: Request, token: string): Response | undefined {
   const header = req.headers.get("authorization") ?? "";
   const [scheme, value] = header.split(" ");
   if (scheme !== "Bearer" || !value || !tokensMatch(value, token)) {
+    // Audit failed auth attempts (path/method only — never the attempted
+    // token) so repeated probing shows up somewhere.
+    logger.warn(
+      `Unauthorized request: ${req.method} ${new URL(req.url).pathname}`,
+    );
     return Response.json(
       { error: 'Unauthorized. Include "Authorization: Bearer <token>".' },
       { status: 401, headers: { "WWW-Authenticate": "Bearer" } },

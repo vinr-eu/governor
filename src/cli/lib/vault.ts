@@ -4,6 +4,7 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
+import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 
 const VAULT_PATH = join(process.cwd(), ".governor", "vault.enc");
@@ -106,6 +107,10 @@ export class Vault {
 
   async save(): Promise<void> {
     await Bun.write(VAULT_PATH, JSON.stringify(this.file, null, 2));
+    // Bun.write doesn't take a mode option, and the file would otherwise
+    // inherit the process umask (typically world-readable) — restrict it
+    // to the owner since it holds encrypted credential material.
+    await chmod(VAULT_PATH, 0o600);
   }
 }
 
