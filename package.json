@@ -15,6 +15,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/prompts": "^2.4.9",
+    "@types/ssh2": "^1.15.5",
     "prettier": "3.9.6"
   },
   "peerDependencies": {
@@ -28,7 +29,6 @@
     "@aws-sdk/client-rds": "^3.1111.0",
     "@aws-sdk/client-s3": "^3.1111.0",
     "@aws-sdk/client-sqs": "^3.1111.0",
-    "@aws-sdk/client-ssm": "^3.1111.0",
     "@aws-sdk/client-sts": "^3.1110.0",
     "@aws-sdk/lib-dynamodb": "^3.1111.0",
     "@aws-sdk/rds-signer": "^3.1111.0",
@@ -36,6 +36,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "consola": "^3.4.2",
     "prompts": "^2.4.2",
+    "ssh2": "^1.17.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }

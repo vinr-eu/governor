@@ -45,7 +45,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import { SQL } from "bun";
 import type { AccessKeyCredential } from "../credentials";
-import { openSsmPortForwardTunnel } from "./ssm-tunnel";
+import { openSshPortForwardTunnel } from "./ssh-tunnel";
 
 export interface AwsCallerIdentity {
   account?: string;
@@ -252,11 +252,11 @@ const MAX_RDS_QUERY_MAX_ROWS = 1000;
 // Every real RDS/Aurora setup reaches the DB by opening a network connection
 // — the Data API's HTTPS-only path only exists for Aurora with it explicitly
 // turned on, and even then still requires a Secrets Manager secret to exist.
-// So this always goes through an SSM Session Manager tunnel via a bastion
-// EC2 instance already inside the target's VPC (no inbound security group
-// rule, public IP, or SSH key needed), and authenticates with a short-lived
-// IAM database-auth token instead of a stored password — no DB secret is
-// ever persisted by governor.
+// So this always goes through an SSH tunnel via a bastion EC2 instance
+// already inside the target's VPC, and by default authenticates with a
+// short-lived IAM database-auth token instead of a stored password — no DB
+// secret is persisted by governor unless a password is explicitly opted in
+// via `governor store rds-password`.
 
 interface RdsEndpointLocation {
   host: string;
@@ -335,7 +335,12 @@ async function resolveRdsEndpoint(
   );
 }
 
-async function resolveBastionInstanceId(
+/**
+ * Resolves a bastion's Name tag to the public IP an SSH tunnel connects
+ * through. Requires the instance to actually have one — governor doesn't
+ * assume any other network path (VPN, Direct Connect) is available.
+ */
+async function resolveBastionAddress(
   credential: AccessKeyCredential,
   bastionName: string,
   region: string,
@@ -364,11 +369,13 @@ async function resolveBastionInstanceId(
         .join(", ")}) — the Name tag must be unique to use it as a bastion.`,
     );
   }
-  const instanceId = instances[0]?.InstanceId;
-  if (!instanceId) {
-    throw new Error(`Bastion instance "${bastionName}" has no instance id.`);
+  const address = instances[0]?.PublicIpAddress;
+  if (!address) {
+    throw new Error(
+      `Bastion instance "${bastionName}" has no public IP address — an SSH tunnel needs one to connect through.`,
+    );
   }
-  return instanceId;
+  return address;
 }
 
 // BigInt/Date/Buffer values from the DB driver aren't JSON-serializable as-is
@@ -383,9 +390,11 @@ function toJsonSafe(value: unknown): unknown {
 
 /**
  * Runs one SQL statement against an RDS instance or Aurora cluster — reached
- * through an SSM tunnel via a bastion EC2 instance already inside its VPC,
- * and authenticated with a short-lived IAM database-auth token instead of a
- * stored password, so governor never persists a DB secret at all.
+ * through an SSH tunnel via a bastion EC2 instance already inside its VPC.
+ * Defaults to authenticating with a short-lived IAM database-auth token, so
+ * no DB secret is persisted; if `options.password` is set (from a vault
+ * entry created via `governor store rds-password`), that's used instead — an
+ * explicit opt-in for databases that don't have IAM DB auth turned on.
  *
  * Every name here — the database, the bastion, the DB user — is the plain
  * human-readable name shown in each console, not an ARN or instance id.
@@ -400,6 +409,13 @@ export async function queryRdsInstance(
     sql: string;
     region?: string;
     maxRows?: number;
+    password?: string;
+    ssh: {
+      username: string;
+      privateKey: string;
+      passphrase?: string;
+      port?: number;
+    };
   },
 ): Promise<RdsQueryResult> {
   const maxRows = Math.min(
@@ -408,39 +424,47 @@ export async function queryRdsInstance(
   );
   const region = options.region ?? process.env.AWS_REGION ?? "us-east-1";
 
-  const [{ host, port, adapter }, bastionInstanceId] = await Promise.all([
+  const [{ host, port, adapter }, bastionAddress] = await Promise.all([
     resolveRdsEndpoint(credential, options.name, region),
-    resolveBastionInstanceId(credential, options.bastionName, region),
+    resolveBastionAddress(credential, options.bastionName, region),
   ]);
 
-  const tunnel = await openSsmPortForwardTunnel(credential, {
-    instanceId: bastionInstanceId,
+  const tunnel = await openSshPortForwardTunnel({
+    host: bastionAddress,
+    port: options.ssh.port,
+    username: options.ssh.username,
+    privateKey: options.ssh.privateKey,
+    passphrase: options.ssh.passphrase,
     remoteHost: host,
     remotePort: port,
-    region,
   });
 
-  const signer = new Signer({
-    hostname: host,
-    port,
-    region,
-    username: options.dbUser,
-    credentials: credential,
-  });
+  const password = options.password
+    ? options.password
+    : () =>
+        new Signer({
+          hostname: host,
+          port,
+          region,
+          username: options.dbUser,
+          credentials: credential,
+        }).getAuthToken();
 
-  // The TLS handshake happens over the SSM tunnel to the real RDS endpoint,
+  // The TLS handshake happens over the SSH tunnel to the real RDS endpoint,
   // but we connect via 127.0.0.1 — the server cert's hostname will never
   // match that, so hostname/CA verification is skipped below. The hop is
   // still encrypted; what's skipped is validating who's on the other end,
-  // which the already-authenticated SSM tunnel covers.
+  // which the already-authenticated SSH tunnel covers.
   const sql = new SQL({
     adapter,
     hostname: "127.0.0.1",
     port: tunnel.localPort,
     database: options.database,
     username: options.dbUser,
-    password: () => signer.getAuthToken(),
+    password,
     tls: { rejectUnauthorized: false },
+    // One query only ever needs one connection — no reason to pay for a pool.
+    max: 1,
   });
 
   try {

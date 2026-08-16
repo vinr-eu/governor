@@ -11,19 +11,19 @@ import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
 
 export async function runSetup(argv: string[]) {
   const { args, flags } = parseFlags(argv);
-  const providerId = args[0];
+  const target = args[0];
   const knownProviders = PROVIDER_PLUGINS.map((p) => p.id).join(", ");
 
-  if (!providerId) {
+  if (!target) {
     logger.error("Usage: governor setup <provider> [options]");
     logger.error(`Known providers: ${knownProviders}`);
     process.exitCode = 1;
     return;
   }
 
-  const provider = findProviderPlugin(providerId);
+  const provider = findProviderPlugin(target);
   if (!provider) {
-    logger.error(`Unknown provider "${providerId}".`);
+    logger.error(`Unknown provider "${target}".`);
     logger.error(`Known providers: ${knownProviders}`);
     process.exitCode = 1;
     return;

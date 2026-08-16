@@ -3,6 +3,7 @@ import { runInit } from "./commands/init";
 import { runRotatePassword } from "./commands/rotate-password";
 import { runServe } from "./commands/serve";
 import { runSetup } from "./commands/setup";
+import { runStore } from "./commands/store";
 import { printHelp, VERSION } from "./help";
 import { logger } from "./lib/logger";
 
@@ -23,6 +24,8 @@ async function main() {
       return runInit();
     case "setup":
       return runSetup(rest);
+    case "store":
+      return runStore(rest);
     case "rotate-password":
       return runRotatePassword();
     case "serve":

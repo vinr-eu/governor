@@ -6,7 +6,10 @@ import { withAudit } from "../../mcp/audit";
 import {
   DEFAULT_PROFILE,
   loadAccessKeyCredentials,
+  loadRdsPasswords,
+  loadSshBastionKeys,
   type AccessKeyCredential,
+  type SshBastionKeyCredential,
 } from "../credentials";
 import type { HttpRouteHandler, ProviderPlugin } from "../plugin";
 import {
@@ -67,8 +70,18 @@ const regionParam = z
     "AWS region the bucket lives in. Defaults to the AWS_REGION env var, else us-east-1. Optional — a wrong guess is automatically detected and retried against the bucket's real region, so this only saves a round trip when you already know it.",
   );
 
+/**
+ * AWS credential plus any RDS passwords stored for its profile (keyed by
+ * `<dbIdentifier>::<dbUser>`) and any SSH bastion keys stored for it (keyed
+ * by bastion name).
+ */
+interface AwsCredential extends AccessKeyCredential {
+  rdsPasswords: Map<string, string>;
+  sshBastionKeys: Map<string, SshBastionKeyCredential>;
+}
+
 async function handleIdentity(
-  credentials: Map<string, AccessKeyCredential>,
+  credentials: Map<string, AwsCredential>,
   profile: string,
 ): Promise<Response> {
   const credential = credentials.get(profile);
@@ -92,21 +105,34 @@ async function handleIdentity(
   }
 }
 
-export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
+export const awsPlugin: ProviderPlugin<AwsCredential> = {
   id: "aws",
   label: "Amazon Web Services",
   authMethod: "access-key",
 
-  loadCredentials(vault: Vault | undefined) {
-    return loadAccessKeyCredentials("aws", vault, {
+  async loadCredentials(vault: Vault | undefined) {
+    const base = await loadAccessKeyCredentials("aws", vault, {
       accessKeyId: "AWS_ACCESS_KEY_ID",
       secretAccessKey: "AWS_SECRET_ACCESS_KEY",
     });
+    const credentials = new Map<string, AwsCredential>();
+    for (const [profile, credential] of base) {
+      credentials.set(profile, {
+        ...credential,
+        rdsPasswords: vault
+          ? await loadRdsPasswords(vault, profile)
+          : new Map(),
+        sshBastionKeys: vault
+          ? await loadSshBastionKeys(vault, profile)
+          : new Map(),
+      });
+    }
+    return credentials;
   },
 
   registerMcpTools(
     server: McpServer,
-    credentials: Map<string, AccessKeyCredential>,
+    credentials: Map<string, AwsCredential>,
   ) {
     server.registerTool(
       "aws_list_profiles",
@@ -292,7 +318,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
       {
         title: "Query an RDS database",
         description:
-          'Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. "prod-orders-db") — never by ARN. Reaches it by opening an SSM Session Manager tunnel through a bastion EC2 instance already inside that VPC (no inbound security group rule, public IP, or SSH key needed) — implemented natively against the AWS SDK, no `aws` CLI or `session-manager-plugin` binary required — and authenticates with a short-lived IAM database-auth token instead of a stored password. Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) IAM database authentication turned on for the database, with dbUser granted the matching DB role, (2) a bastion EC2 instance with the SSM Agent, network reachability to the database, and a unique Name tag, (3) the calling AWS profile has ssm:StartSession/ssm:TerminateSession on the bastion. Governor never persists a DB password or uses the RDS Data API, so this works whether or not Data API is enabled. Results are capped at maxRows; the response\'s `truncated` flag says whether more rows exist.',
+          'Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. "prod-orders-db") — never by ARN. Reaches it by opening an SSH tunnel through a bastion EC2 instance already inside that VPC — implemented natively against the `ssh2` library, no `ssh` CLI binary required. By default authenticates to the database with a short-lived IAM database-auth token instead of a stored password; if a password was stored for this exact name+dbUser via `governor store rds-password`, that\'s used instead (opt-in, for databases without IAM DB auth turned on). Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) either IAM database authentication turned on with dbUser granted the matching DB role, or a password stored via `governor store rds-password`, (2) a bastion EC2 instance with a public IP, network reachability to the database, a unique Name tag, and an SSH key stored via `governor store ssh-key <bastionName>` whose public half is in the bastion\'s authorized_keys. Results are capped at maxRows; the response\'s `truncated` flag says whether more rows exist.',
         inputSchema: {
           name: z
             .string()
@@ -302,7 +328,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
           bastionName: z
             .string()
             .describe(
-              "Name tag of the EC2 instance to tunnel through — must have the SSM Agent, network access to the RDS instance, and a unique Name tag.",
+              "Name tag of the EC2 instance to tunnel through — must have a public IP, network access to the RDS instance, a unique Name tag, and a key stored via `governor store ssh-key`.",
             ),
           dbUser: z
             .string()
@@ -337,6 +363,19 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
           const resolvedProfile = profile ?? DEFAULT_PROFILE;
           const credential = credentials.get(resolvedProfile);
           if (!credential) return notConnected(resolvedProfile);
+          const password = credential.rdsPasswords.get(`${name}::${dbUser}`);
+          const sshKey = credential.sshBastionKeys.get(bastionName);
+          if (!sshKey) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: `No SSH key stored for bastion "${bastionName}" (profile "${resolvedProfile}"). Run \`governor store ssh-key ${bastionName} --user <ssh-username> --key-file <path>\` first.`,
+                },
+              ],
+            };
+          }
 
           try {
             const result = await queryRdsInstance(credential, {
@@ -347,6 +386,8 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
               sql,
               region,
               maxRows,
+              password,
+              ssh: sshKey,
             });
             return {
               content: [{ type: "text", text: JSON.stringify(result) }],
@@ -1047,7 +1088,7 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
   },
 
   registerHttpRoutes(
-    credentials: Map<string, AccessKeyCredential>,
+    credentials: Map<string, AwsCredential>,
   ): Record<string, HttpRouteHandler> {
     return {
       "/providers/aws/identity": () =>

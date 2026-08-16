@@ -1,4 +1,4 @@
-import { listProfiles, profileKey, type Vault } from "../cli/lib/vault";
+import { listEntryKeys, listProfiles, profileKey, type Vault } from "../cli/lib/vault";
 
 export const DEFAULT_PROFILE = "default";
 
@@ -37,4 +37,65 @@ export async function loadAccessKeyCredentials(
     credentials.set(DEFAULT_PROFILE, { accessKeyId, secretAccessKey });
   }
   return credentials;
+}
+
+const RDS_PASSWORD_PREFIX = "aws-rds-password";
+
+/** Vault key for a stored RDS/Aurora DB password — opt-in alternative to IAM DB auth tokens. */
+export function rdsPasswordKey(
+  profile: string,
+  dbIdentifier: string,
+  dbUser: string,
+): string {
+  return `${RDS_PASSWORD_PREFIX}::${profile}::${dbIdentifier}::${dbUser}`;
+}
+
+/**
+ * Every stored RDS password for one profile, keyed by `<dbIdentifier>::<dbUser>`
+ * so a tool call can look one up by the same names the caller already passes.
+ */
+export async function loadRdsPasswords(
+  vault: Vault,
+  profile: string,
+): Promise<Map<string, string>> {
+  const prefix = `${RDS_PASSWORD_PREFIX}::${profile}::`;
+  const passwords = new Map<string, string>();
+  for (const key of await listEntryKeys()) {
+    if (!key.startsWith(prefix)) continue;
+    const entry = vault.get<{ password: string }>(key);
+    if (entry) passwords.set(key.slice(prefix.length), entry.password);
+  }
+  return passwords;
+}
+
+export interface SshBastionKeyCredential {
+  username: string;
+  privateKey: string;
+  passphrase?: string;
+  port?: number;
+}
+
+const SSH_BASTION_KEY_PREFIX = "aws-ssh-bastion-key";
+
+/** Vault key for a stored SSH private key used to tunnel through a bastion EC2 instance. */
+export function sshBastionKeyKey(profile: string, bastionName: string): string {
+  return `${SSH_BASTION_KEY_PREFIX}::${profile}::${bastionName}`;
+}
+
+/**
+ * Every stored SSH bastion key for one profile, keyed by bastion name so a
+ * tool call can look one up by the same name the caller already passes.
+ */
+export async function loadSshBastionKeys(
+  vault: Vault,
+  profile: string,
+): Promise<Map<string, SshBastionKeyCredential>> {
+  const prefix = `${SSH_BASTION_KEY_PREFIX}::${profile}::`;
+  const keys = new Map<string, SshBastionKeyCredential>();
+  for (const key of await listEntryKeys()) {
+    if (!key.startsWith(prefix)) continue;
+    const entry = vault.get<SshBastionKeyCredential>(key);
+    if (entry) keys.set(key.slice(prefix.length), entry);
+  }
+  return keys;
 }
