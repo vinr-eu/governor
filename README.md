@@ -132,6 +132,8 @@ MCP tools:
 | `aws_logs_search`                | Searches a CloudWatch log group by filter pattern across all its streams, ordered by time, within a time range (default: last hour).                                                                                                                            |
 | `aws_cloudwatch_list_metrics`    | Discovers which CloudWatch metrics exist — namespace, metric name, dimensions — for a namespace/metric/dimension filter. Doubles as free resource inventory (e.g. every ECS service, every RDS instance) since dimensions come from what's actually publishing. |
 | `aws_cloudwatch_get_metric_data` | Fetches datapoints for up to 100 metrics in one batched call — e.g. CPU and memory across every ECS service in a cluster — within a time range (default: last hour).                                                                                            |
+| `aws_sqs_list_queues_by_backlog` | Ranks every SQS queue by backlog (visible + in-flight + delayed messages), worst first, and flags DLQs. Paginated via `offset`/`limit`.                                                                                                                         |
+| `aws_sqs_peek_messages`          | Peeks at a queue's messages, bodies included, without deleting them — briefly hides each from real consumers via a short visibility timeout instead.                                                                                                            |
 
 REST:
 

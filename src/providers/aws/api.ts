@@ -37,6 +37,12 @@ import {
   QueryCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
+import {
+  GetQueueAttributesCommand,
+  ListQueuesCommand,
+  ReceiveMessageCommand,
+  SQSClient,
+} from "@aws-sdk/client-sqs";
 import { SQL } from "bun";
 import type { AccessKeyCredential } from "../credentials";
 import { openSsmPortForwardTunnel } from "./ssm-tunnel";
@@ -1356,4 +1362,368 @@ export async function getCloudWatchMetricData(
       truncated: truncatedIds.has(metricQueryId(index)),
     };
   });
+}
+
+function sqsClient(
+  credential: AccessKeyCredential,
+  region?: string,
+): SQSClient {
+  return new SQSClient({
+    region: region ?? process.env.AWS_REGION ?? "us-east-1",
+    credentials: credential,
+  });
+}
+
+function queueNameFromUrl(queueUrl: string): string {
+  return queueUrl.split("/").pop() ?? queueUrl;
+}
+
+// A queue can be deleted between ListQueues and GetQueueAttributes, or the
+// caller may lack sqs:GetQueueAttributes on that one queue specifically —
+// either should drop the queue from the ranking rather than failing the
+// whole call over one queue.
+function isSqsQueueUnavailableError(err: unknown): boolean {
+  const name = (err as { name?: string })?.name;
+  return (
+    name === "QueueDoesNotExist" ||
+    name === "AWS.SimpleQueueService.NonExistentQueue" ||
+    name === "AccessDenied"
+  );
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await fn(items[index] as T);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, worker),
+  );
+  return results;
+}
+
+const DEFAULT_SQS_MAX_SCAN = 1000;
+const MAX_SQS_MAX_SCAN = 1000; // matches the default per-region SQS queue quota
+const DEFAULT_SQS_BACKLOG_LIMIT = 50;
+const MAX_SQS_BACKLOG_LIMIT = 200;
+const SQS_ATTRIBUTE_FETCH_CONCURRENCY = 20;
+
+const SQS_BACKLOG_ATTRIBUTE_NAMES = [
+  "ApproximateNumberOfMessages",
+  "ApproximateNumberOfMessagesNotVisible",
+  "ApproximateNumberOfMessagesDelayed",
+  "RedrivePolicy",
+  "QueueArn",
+  "CreatedTimestamp",
+  "LastModifiedTimestamp",
+] as const;
+
+/**
+ * Lists up to `maxScan` queue URLs (paginating ListQueues internally).
+ * `scanIncomplete` says whether the account actually has more queues than
+ * `maxScan` allowed scanning — when true, the backlog ranking built from
+ * this list may be missing queues that weren't considered at all.
+ */
+async function listQueueUrls(
+  sqs: SQSClient,
+  options: { prefix?: string; maxScan: number },
+): Promise<{ urls: string[]; scanIncomplete: boolean }> {
+  const urls: string[] = [];
+  let nextToken: string | undefined;
+  do {
+    const page = await sqs.send(
+      new ListQueuesCommand({
+        QueueNamePrefix: options.prefix,
+        NextToken: nextToken,
+        MaxResults: 1000,
+      }),
+    );
+    urls.push(...(page.QueueUrls ?? []));
+    nextToken = page.NextToken;
+  } while (nextToken && urls.length < options.maxScan);
+
+  return {
+    urls: urls.slice(0, options.maxScan),
+    scanIncomplete: nextToken !== undefined,
+  };
+}
+
+async function fetchQueueBacklogAttributes(
+  sqs: SQSClient,
+  queueUrl: string,
+): Promise<
+  { queueUrl: string; attributes: Record<string, string> } | undefined
+> {
+  try {
+    const result = await sqs.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: queueUrl,
+        AttributeNames: [...SQS_BACKLOG_ATTRIBUTE_NAMES],
+      }),
+    );
+    return { queueUrl, attributes: result.Attributes ?? {} };
+  } catch (err) {
+    if (isSqsQueueUnavailableError(err)) return undefined;
+    throw err;
+  }
+}
+
+export interface SqsQueueBacklogSummary {
+  queueUrl: string;
+  queueName: string;
+  approximateNumberOfMessages: number;
+  approximateNumberOfMessagesNotVisible: number;
+  approximateNumberOfMessagesDelayed: number;
+  backlog: number;
+  isDlq: boolean;
+  createdTimestamp?: string;
+  lastModifiedTimestamp?: string;
+}
+
+export interface SqsBacklogPage {
+  queues: SqsQueueBacklogSummary[];
+  offset: number;
+  totalMatching: number;
+  truncated: boolean;
+  scanIncomplete: boolean;
+}
+
+/**
+ * Ranks every queue visible to a profile by how clogged it is — the sum of
+ * messages waiting (`ApproximateNumberOfMessages`), in flight (`...NotVisible`),
+ * and delayed (`...Delayed`) — worst first. Marks `isDlq` for any queue named
+ * as another scanned queue's RedrivePolicy dead-letter target, so a DLQ
+ * quietly filling up (nothing consumes those) stands out from a busy but
+ * healthy working queue.
+ *
+ * Ranking requires fetching every queue's attributes up front, so this scans
+ * up to `maxScan` queues (default and max 1000, matching the per-region SQS
+ * queue quota) before sorting — `scanIncomplete` says whether the account
+ * actually has more queues than that, in which case the ranking may be
+ * missing some. Narrow with `prefix` to scan a smaller, known-relevant set
+ * instead. `offset`/`limit` then paginate the already-ranked list;
+ * `truncated` says whether more ranked queues remain after this page.
+ */
+export async function listSqsQueuesByBacklog(
+  credential: AccessKeyCredential,
+  options: {
+    region?: string;
+    prefix?: string;
+    offset?: number;
+    limit?: number;
+    maxScan?: number;
+  } = {},
+): Promise<SqsBacklogPage> {
+  const offset = Math.max(0, options.offset ?? 0);
+  const limit = Math.min(
+    options.limit ?? DEFAULT_SQS_BACKLOG_LIMIT,
+    MAX_SQS_BACKLOG_LIMIT,
+  );
+  const maxScan = Math.min(
+    options.maxScan ?? DEFAULT_SQS_MAX_SCAN,
+    MAX_SQS_MAX_SCAN,
+  );
+  const sqs = sqsClient(credential, options.region);
+
+  const { urls, scanIncomplete } = await listQueueUrls(sqs, {
+    prefix: options.prefix,
+    maxScan,
+  });
+
+  const fetched = await mapWithConcurrency(
+    urls,
+    SQS_ATTRIBUTE_FETCH_CONCURRENCY,
+    (queueUrl) => fetchQueueBacklogAttributes(sqs, queueUrl),
+  );
+  const resolved = fetched.filter(
+    (r): r is { queueUrl: string; attributes: Record<string, string> } =>
+      r !== undefined,
+  );
+
+  const dlqTargetArns = new Set<string>();
+  for (const { attributes } of resolved) {
+    if (!attributes.RedrivePolicy) continue;
+    try {
+      const targetArn = JSON.parse(
+        attributes.RedrivePolicy,
+      )?.deadLetterTargetArn;
+      if (typeof targetArn === "string") dlqTargetArns.add(targetArn);
+    } catch {
+      // Malformed RedrivePolicy JSON — just means this queue's DLQ link
+      // can't be resolved; doesn't affect the rest of the ranking.
+    }
+  }
+
+  const queues: SqsQueueBacklogSummary[] = resolved.map(
+    ({ queueUrl, attributes }) => {
+      const visible = Number(attributes.ApproximateNumberOfMessages ?? 0);
+      const notVisible = Number(
+        attributes.ApproximateNumberOfMessagesNotVisible ?? 0,
+      );
+      const delayed = Number(
+        attributes.ApproximateNumberOfMessagesDelayed ?? 0,
+      );
+      return {
+        queueUrl,
+        queueName: queueNameFromUrl(queueUrl),
+        approximateNumberOfMessages: visible,
+        approximateNumberOfMessagesNotVisible: notVisible,
+        approximateNumberOfMessagesDelayed: delayed,
+        backlog: visible + notVisible + delayed,
+        isDlq:
+          attributes.QueueArn !== undefined &&
+          dlqTargetArns.has(attributes.QueueArn),
+        createdTimestamp: attributes.CreatedTimestamp
+          ? new Date(Number(attributes.CreatedTimestamp) * 1000).toISOString()
+          : undefined,
+        lastModifiedTimestamp: attributes.LastModifiedTimestamp
+          ? new Date(
+              Number(attributes.LastModifiedTimestamp) * 1000,
+            ).toISOString()
+          : undefined,
+      };
+    },
+  );
+
+  queues.sort((a, b) => b.backlog - a.backlog);
+  const page = queues.slice(offset, offset + limit);
+
+  return {
+    queues: page,
+    offset,
+    totalMatching: queues.length,
+    truncated: offset + page.length < queues.length,
+    scanIncomplete,
+  };
+}
+
+export interface SqsMessageSummary {
+  messageId: string;
+  body: string;
+  approximateReceiveCount?: number;
+  sentTimestamp?: string;
+  attributes: Record<string, string>;
+  messageAttributes: Record<string, string>;
+}
+
+export interface SqsPeekMessagesResult {
+  messages: SqsMessageSummary[];
+  truncated: boolean;
+}
+
+const DEFAULT_SQS_PEEK_MAX_MESSAGES = 10;
+const MAX_SQS_PEEK_MAX_MESSAGES = 100;
+const SQS_PEEK_RECEIVE_BATCH_SIZE = 10; // SQS's own per-call max
+const SQS_PEEK_MAX_EMPTY_ATTEMPTS = 2;
+const DEFAULT_SQS_PEEK_VISIBILITY_TIMEOUT_SECONDS = 5;
+const MAX_SQS_PEEK_VISIBILITY_TIMEOUT_SECONDS = 60;
+
+/**
+ * Peeks at messages sitting in a queue — including their bodies — without
+ * deleting them. SQS has no read-only "list messages" API, so this uses
+ * ReceiveMessage under the hood, which briefly makes each returned message
+ * invisible to real consumers for `visibilityTimeoutSeconds` (default 5s,
+ * capped at 60s) — kept short specifically so peeking doesn't meaningfully
+ * interfere with production processing. Governor never deletes what it
+ * peeks, so every message simply becomes visible again once that timeout
+ * elapses.
+ *
+ * SQS has no stable "page 2" cursor — ReceiveMessage returns an
+ * approximately-random sample of what's currently visible, and standard
+ * (non-FIFO) queues don't guarantee delivery order to begin with. Calling
+ * this again after `visibilityTimeoutSeconds` elapses tends to surface a
+ * different set of messages (the ones just peeked are briefly excluded from
+ * being received again), which is the closest approximation of "next page"
+ * SQS supports — not a guaranteed, non-overlapping cursor.
+ */
+export async function peekSqsMessages(
+  credential: AccessKeyCredential,
+  queueUrl: string,
+  options: {
+    region?: string;
+    maxMessages?: number;
+    visibilityTimeoutSeconds?: number;
+  } = {},
+): Promise<SqsPeekMessagesResult> {
+  const maxMessages = Math.min(
+    options.maxMessages ?? DEFAULT_SQS_PEEK_MAX_MESSAGES,
+    MAX_SQS_PEEK_MAX_MESSAGES,
+  );
+  const visibilityTimeout = Math.min(
+    Math.max(
+      0,
+      options.visibilityTimeoutSeconds ??
+        DEFAULT_SQS_PEEK_VISIBILITY_TIMEOUT_SECONDS,
+    ),
+    MAX_SQS_PEEK_VISIBILITY_TIMEOUT_SECONDS,
+  );
+  const sqs = sqsClient(credential, options.region);
+
+  const messages = new Map<string, SqsMessageSummary>();
+  let emptyAttempts = 0;
+
+  while (
+    messages.size < maxMessages &&
+    emptyAttempts < SQS_PEEK_MAX_EMPTY_ATTEMPTS
+  ) {
+    const page = await sqs.send(
+      new ReceiveMessageCommand({
+        QueueUrl: queueUrl,
+        MaxNumberOfMessages: Math.min(
+          SQS_PEEK_RECEIVE_BATCH_SIZE,
+          maxMessages - messages.size,
+        ),
+        VisibilityTimeout: visibilityTimeout,
+        WaitTimeSeconds: 0,
+        MessageAttributeNames: ["All"],
+        AttributeNames: ["All"],
+      }),
+    );
+
+    const received = page.Messages ?? [];
+    if (received.length === 0) {
+      emptyAttempts++;
+      continue;
+    }
+    emptyAttempts = 0;
+
+    for (const message of received) {
+      if (!message.MessageId || message.Body === undefined) continue;
+      messages.set(message.MessageId, {
+        messageId: message.MessageId,
+        body: message.Body,
+        approximateReceiveCount: message.Attributes?.ApproximateReceiveCount
+          ? Number(message.Attributes.ApproximateReceiveCount)
+          : undefined,
+        sentTimestamp: message.Attributes?.SentTimestamp
+          ? new Date(Number(message.Attributes.SentTimestamp)).toISOString()
+          : undefined,
+        attributes: message.Attributes ?? {},
+        messageAttributes: Object.fromEntries(
+          Object.entries(message.MessageAttributes ?? {}).map(
+            ([name, attr]) => [
+              name,
+              attr.StringValue ??
+                (attr.BinaryValue
+                  ? Buffer.from(attr.BinaryValue).toString("base64")
+                  : ""),
+            ],
+          ),
+        ),
+      });
+    }
+  }
+
+  return {
+    messages: [...messages.values()].slice(0, maxMessages),
+    truncated: messages.size >= maxMessages,
+  };
 }

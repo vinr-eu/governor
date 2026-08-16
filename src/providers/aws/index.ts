@@ -19,6 +19,8 @@ import {
   listCloudWatchMetrics,
   listDynamoDbTables,
   listS3Buckets,
+  listSqsQueuesByBacklog,
+  peekSqsMessages,
   queryDynamoDbTable,
   queryRdsInstance,
   scanDynamoDbTable,
@@ -908,6 +910,133 @@ export const awsPlugin: ProviderPlugin<AccessKeyCredential> = {
             });
             return {
               content: [{ type: "text", text: JSON.stringify({ results }) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_sqs_list_queues_by_backlog",
+      {
+        title: "List SQS queues ranked by backlog",
+        description:
+          "Ranks every SQS queue visible to a profile by how clogged it is — worst first — using the sum of messages waiting, in flight, and delayed. Marks `isDlq` on any queue that another scanned queue's RedrivePolicy names as its dead-letter target, so a DLQ quietly filling up (nothing consumes those) stands out from a busy but healthy working queue. Narrow with `prefix` to scan a smaller, known-relevant set. `offset`/`limit` paginate the ranked list (default limit 50, max 200); `truncated` says whether more ranked queues remain after this page, and `scanIncomplete` says whether the account has more queues than were scanned at all (default/max scan 1000, the per-region SQS quota) — in which case the ranking may be missing some.",
+        inputSchema: {
+          prefix: z
+            .string()
+            .optional()
+            .describe(
+              "Only include queues whose name starts with this prefix.",
+            ),
+          offset: z
+            .number()
+            .int()
+            .nonnegative()
+            .optional()
+            .describe(
+              "Number of ranked queues to skip (default 0) — for paginating past the first page.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .positive()
+            .max(200)
+            .optional()
+            .describe("Maximum ranked queues to return (default 50, max 200)."),
+          maxScan: z
+            .number()
+            .int()
+            .positive()
+            .max(1000)
+            .optional()
+            .describe(
+              "Maximum queues to scan and rank before paginating (default and max 1000, the per-region SQS queue quota).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_sqs_list_queues_by_backlog",
+        async ({ prefix, offset, limit, maxScan, profile, region }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await listSqsQueuesByBacklog(credential, {
+              region,
+              prefix,
+              offset,
+              limit,
+              maxScan,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_sqs_peek_messages",
+      {
+        title: "Peek at messages in an SQS queue",
+        description:
+          'Peeks at messages sitting in a queue — including their bodies — without deleting them. SQS has no read-only "list messages" API, so this briefly makes each returned message invisible to real consumers for `visibilityTimeoutSeconds` (default 5s, capped at 60s, kept short so it doesn\'t meaningfully interfere with production processing); governor never deletes what it peeks, so messages simply become visible again once that timeout elapses. SQS has no stable "page 2" cursor — this returns an approximately-random sample of what\'s currently visible, and standard (non-FIFO) queues don\'t guarantee delivery order. Calling this again after the visibility timeout elapses tends to surface a different set of messages, which is the closest approximation of pagination SQS supports.',
+        inputSchema: {
+          queueUrl: z
+            .string()
+            .describe(
+              "Full URL of the queue to peek, as returned by aws_sqs_list_queues_by_backlog.",
+            ),
+          maxMessages: z
+            .number()
+            .int()
+            .positive()
+            .max(100)
+            .optional()
+            .describe("Maximum messages to return (default 10, max 100)."),
+          visibilityTimeoutSeconds: z
+            .number()
+            .int()
+            .nonnegative()
+            .max(60)
+            .optional()
+            .describe(
+              "How long each peeked message is hidden from real consumers, in seconds (default 5, max 60).",
+            ),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_sqs_peek_messages",
+        async ({
+          queueUrl,
+          maxMessages,
+          visibilityTimeoutSeconds,
+          profile,
+          region,
+        }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+
+          try {
+            const result = await peekSqsMessages(credential, queueUrl, {
+              region,
+              maxMessages,
+              visibilityTimeoutSeconds,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
             };
           } catch (err) {
             return toErrorResult(err);
