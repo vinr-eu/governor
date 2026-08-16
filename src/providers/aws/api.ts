@@ -1,5 +1,5 @@
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
-import type { AccessKeyCredential } from "./credentials";
+import type { AccessKeyCredential } from "../credentials";
 
 export interface AwsCallerIdentity {
   account?: string;

@@ -7,14 +7,11 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer } from "../../mcp/server";
-import type { AccessKeyCredential } from "../../providers/credentials";
-import { fetchAwsCallerIdentity } from "../../providers/aws";
+import { PROVIDER_PLUGINS } from "../../providers";
 import { parseFlags } from "../lib/flags";
 import { logger } from "../lib/logger";
 import { promptPassword } from "../lib/prompt";
-import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
-
-const DEFAULT_PROFILE = "default";
+import { Vault, vaultExists } from "../lib/vault";
 
 const mcpTransports = new Map<
   string,
@@ -23,7 +20,7 @@ const mcpTransports = new Map<
 
 async function handleMcp(
   req: Request,
-  awsCredentials: Map<string, AccessKeyCredential>,
+  credentialsByProvider: Map<string, Map<string, unknown>>,
 ): Promise<Response> {
   const sessionId = req.headers.get("mcp-session-id") ?? undefined;
 
@@ -81,14 +78,21 @@ async function handleMcp(
     if (transport.sessionId) mcpTransports.delete(transport.sessionId);
   };
 
-  const mcpServer = createMcpServer(awsCredentials);
+  const mcpServer = createMcpServer(credentialsByProvider);
   await mcpServer.connect(transport);
   return transport.handleRequest(req, { parsedBody: body });
 }
 
-async function loadAwsCredentials(): Promise<Map<string, AccessKeyCredential>> {
-  const credentials = new Map<string, AccessKeyCredential>();
-
+/**
+ * Unlocks the vault once (if one exists) and lets every provider plugin
+ * resolve its own credentials against it, falling back to env vars when
+ * there's no vault at all. Centralizing the unlock means N providers never
+ * means N master-password prompts.
+ */
+async function loadAllCredentials(): Promise<
+  Map<string, Map<string, unknown>>
+> {
+  let vault: Vault | undefined;
   if (await vaultExists()) {
     const password = process.stdin.isTTY
       ? await promptPassword("Master password to unlock the vault:")
@@ -99,23 +103,14 @@ async function loadAwsCredentials(): Promise<Map<string, AccessKeyCredential>> {
         "Vault found but no password available. Set GOVERNOR_MASTER_PASSWORD in non-interactive environments.",
       );
     }
-
-    const vault = await Vault.open(password);
-    for (const profile of await listProfiles("aws")) {
-      const credential = vault.get<AccessKeyCredential>(
-        profileKey("aws", profile),
-      );
-      if (credential) credentials.set(profile, credential);
-    }
-    return credentials;
+    vault = await Vault.open(password);
   }
 
-  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-  if (accessKeyId && secretAccessKey) {
-    credentials.set(DEFAULT_PROFILE, { accessKeyId, secretAccessKey });
+  const credentialsByProvider = new Map<string, Map<string, unknown>>();
+  for (const plugin of PROVIDER_PLUGINS) {
+    credentialsByProvider.set(plugin.id, await plugin.loadCredentials(vault));
   }
-  return credentials;
+  return credentialsByProvider;
 }
 
 // Hash before comparing so timingSafeEqual never sees mismatched-length
@@ -138,31 +133,6 @@ function requireAuth(req: Request, token: string): Response | undefined {
   return undefined;
 }
 
-async function handleAwsIdentity(
-  credentials: Map<string, AccessKeyCredential>,
-  profile: string,
-) {
-  const credential = credentials.get(profile);
-  if (!credential) {
-    return Response.json(
-      {
-        error: `AWS profile "${profile}" is not set up. Run \`governor setup aws --profile ${profile}\` first.`,
-      },
-      { status: 503 },
-    );
-  }
-
-  try {
-    const identity = await fetchAwsCallerIdentity(credential);
-    return Response.json({ profile, ...identity });
-  } catch (err) {
-    return Response.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 502 },
-    );
-  }
-}
-
 export async function runServe(args: string[]) {
   const { flags } = parseFlags(args);
   const port = Number(flags.port ?? 8787);
@@ -171,20 +141,23 @@ export async function runServe(args: string[]) {
   // the operator explicitly opts in with --host.
   const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
 
-  let awsCredentials: Map<string, AccessKeyCredential>;
+  let credentialsByProvider: Map<string, Map<string, unknown>>;
   try {
-    awsCredentials = await loadAwsCredentials();
+    credentialsByProvider = await loadAllCredentials();
   } catch (err) {
     logger.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
     return;
   }
 
-  logger.info(
-    awsCredentials.size > 0
-      ? `AWS credentials loaded for profiles: ${[...awsCredentials.keys()].join(", ")} (held in memory, never exposed to callers).`
-      : "No AWS credentials found — run `governor setup aws` or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.",
-  );
+  for (const plugin of PROVIDER_PLUGINS) {
+    const credentials = credentialsByProvider.get(plugin.id) ?? new Map();
+    logger.info(
+      credentials.size > 0
+        ? `${plugin.label} credentials loaded for profiles: ${[...credentials.keys()].join(", ")} (held in memory, never exposed to callers).`
+        : `No ${plugin.label} credentials found — run \`governor setup ${plugin.id}\` or set the provider's env vars.`,
+    );
+  }
 
   const mcpToken =
     process.env.GOVERNOR_MCP_TOKEN ?? randomBytes(24).toString("base64url");
@@ -202,6 +175,22 @@ export async function runServe(args: string[]) {
     '/mcp and /providers/* require an "Authorization: Bearer <token>" header.',
   );
 
+  const providerRoutes: Record<
+    string,
+    (req: Bun.BunRequest) => Response | Promise<Response>
+  > = {};
+  for (const plugin of PROVIDER_PLUGINS) {
+    if (!plugin.registerHttpRoutes) continue;
+    const credentials = credentialsByProvider.get(plugin.id) ?? new Map();
+    const routes = plugin.registerHttpRoutes(credentials);
+    for (const [path, handler] of Object.entries(routes)) {
+      providerRoutes[path] = (req) => {
+        const unauthorized = requireAuth(req, mcpToken);
+        return unauthorized ?? handler(req);
+      };
+    }
+  }
+
   const server = Bun.serve({
     port,
     hostname: host,
@@ -209,20 +198,9 @@ export async function runServe(args: string[]) {
       "/health": () => Response.json({ status: "ok" }),
       "/mcp": async (req) => {
         const unauthorized = requireAuth(req, mcpToken);
-        return unauthorized ?? handleMcp(req, awsCredentials);
+        return unauthorized ?? handleMcp(req, credentialsByProvider);
       },
-      "/providers/aws/identity": async (req) => {
-        const unauthorized = requireAuth(req, mcpToken);
-        return (
-          unauthorized ?? handleAwsIdentity(awsCredentials, DEFAULT_PROFILE)
-        );
-      },
-      "/providers/aws/:profile/identity": async (req) => {
-        const unauthorized = requireAuth(req, mcpToken);
-        return (
-          unauthorized ?? handleAwsIdentity(awsCredentials, req.params.profile)
-        );
-      },
+      ...providerRoutes,
     },
   });
 

@@ -1,20 +1,18 @@
-import type { AccessKeyCredential } from "../../providers/credentials";
 import {
-  findProvider,
-  PROVIDERS,
-  type ProviderDescriptor,
-} from "../../providers/registry";
+  DEFAULT_PROFILE,
+  type AccessKeyCredential,
+} from "../../providers/credentials";
+import { findProviderPlugin, PROVIDER_PLUGINS } from "../../providers";
+import type { ProviderPlugin } from "../../providers/plugin";
 import { parseFlags, type ParsedArgs } from "../lib/flags";
 import { logger } from "../lib/logger";
 import { promptPassword, promptText } from "../lib/prompt";
 import { listProfiles, profileKey, Vault, vaultExists } from "../lib/vault";
 
-const DEFAULT_PROFILE = "default";
-
 export async function runSetup(argv: string[]) {
   const { args, flags } = parseFlags(argv);
   const providerId = args[0];
-  const knownProviders = PROVIDERS.map((p) => p.id).join(", ");
+  const knownProviders = PROVIDER_PLUGINS.map((p) => p.id).join(", ");
 
   if (!providerId) {
     logger.error("Usage: governor setup <provider> [options]");
@@ -23,7 +21,7 @@ export async function runSetup(argv: string[]) {
     return;
   }
 
-  const provider = findProvider(providerId);
+  const provider = findProviderPlugin(providerId);
   if (!provider) {
     logger.error(`Unknown provider "${providerId}".`);
     logger.error(`Known providers: ${knownProviders}`);
@@ -45,7 +43,7 @@ export async function runSetup(argv: string[]) {
   process.exitCode = 1;
 }
 
-async function listConfiguredProfiles(provider: ProviderDescriptor) {
+async function listConfiguredProfiles(provider: ProviderPlugin) {
   if (!(await vaultExists())) {
     logger.error("No vault found. Run `governor init` first.");
     process.exitCode = 1;
@@ -62,7 +60,7 @@ async function listConfiguredProfiles(provider: ProviderDescriptor) {
 }
 
 async function setupWithAccessKey(
-  provider: ProviderDescriptor,
+  provider: ProviderPlugin,
   flags: ParsedArgs["flags"],
 ) {
   if (!(await vaultExists())) {
