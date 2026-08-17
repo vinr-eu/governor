@@ -93,12 +93,13 @@ bun run build          # -> ./dist/governor
 
 ## CLI reference
 
-| Command                     | Description                                                                                                                                                     |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `governor init`             | Create the encrypted vault and set the master password.                                                                                                         |
-| `governor setup <provider>` | Store credentials for a provider. `--profile <name>` to use a named profile (default `"default"`); `--list` to list configured profiles.                        |
-| `governor rotate-password`  | Re-encrypt the vault under a new master password — the standard remediation if the old one may be compromised. Also upgrades the vault's KDF params to current. |
-| `governor serve`            | Start the MCP endpoint. `--host` (default `127.0.0.1`), `--port` (default `8787`).                                                                              |
+| Command                        | Description                                                                                                                                                                                                           |
+|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `governor init`                | Create the encrypted vault and set the master password.                                                                                                                                                               |
+| `governor setup <provider>`    | Store credentials for a provider. `--profile <name>` to use a named profile (default `"default"`); `--list` to list configured profiles.                                                                              |
+| `governor store <secret-type>` | Store an auxiliary secret a tool opts into, e.g. `governor store ssh-key <bastionName> --user <name> --key-file <path>` or `governor store rds-password <name> <dbUser>`. See [docs/tools/rds.md](docs/tools/rds.md). |
+| `governor rotate-password`     | Re-encrypt the vault under a new master password — the standard remediation if the old one may be compromised. Also upgrades the vault's KDF params to current.                                                       |
+| `governor serve`               | Start the MCP endpoint. `--host` (default `127.0.0.1`), `--port` (default `8787`).                                                                                                                                    |
 
 `serve` reads its bearer token from `GOVERNOR_MCP_TOKEN` if set, otherwise generates one and prints it once at startup.
 In non-interactive contexts (no TTY — CI, cron), the vault password comes from `GOVERNOR_MASTER_PASSWORD`
@@ -116,13 +117,13 @@ Auth method: access key (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) — chos
 MCP tools:
 
 | Tool                             | Does                                                                                                                                                                                                                                                            |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `aws_list_profiles`              | Lists AWS profiles connected to this governor instance.                                                                                                                                                                                                         |
 | `aws_get_caller_identity`        | STS `GetCallerIdentity` for a profile — account id, ARN, user id.                                                                                                                                                                                               |
 | `aws_s3_list_buckets`            | Lists every S3 bucket visible to a profile, with region and creation date.                                                                                                                                                                                      |
 | `aws_s3_search_objects`          | Lists/searches objects in a bucket by prefix and/or substring — key, size, last-modified, etag. Never returns object contents.                                                                                                                                  |
 | `aws_s3_get_download_url`        | Returns a time-limited, read-only presigned download URL for one object — never the bytes or credentials.                                                                                                                                                       |
-| `aws_rds_instance_query`         | Runs one SQL statement against an RDS/Aurora database over an SSM tunnel through a bastion, authenticated with a short-lived IAM DB token — no stored password.                                                                                                 |
+| `aws_rds_instance_query`         | Runs one SQL statement against an RDS/Aurora database over an SSH tunnel through a bastion, authenticated with a short-lived IAM DB token by default, or a stored password (`governor store rds-password`) as an opt-in.                                        |
 | `aws_dynamodb_list_tables`       | Lists every DynamoDB table visible to a profile in a region.                                                                                                                                                                                                    |
 | `aws_dynamodb_describe_table`    | Table status, item count, size, primary key schema, and global secondary indexes.                                                                                                                                                                               |
 | `aws_dynamodb_get_item`          | Fetches a single item by its exact primary key.                                                                                                                                                                                                                 |
@@ -138,12 +139,15 @@ MCP tools:
 REST:
 
 | Route                                  | Does                                       |
-| -------------------------------------- | ------------------------------------------ |
+|----------------------------------------|--------------------------------------------|
 | `GET /providers/aws/identity`          | Caller identity for the `default` profile. |
 | `GET /providers/aws/:profile/identity` | Caller identity for a named profile.       |
 
 Every S3 tool takes an optional `region` — it's a starting guess, not a requirement; a wrong one is caught via S3's
 region-redirect response and retried automatically against the bucket's real region.
+
+See [`docs/`](docs/README.md) for per-tool documentation — exact parameters, example calls/responses, and error shapes
+for every tool above.
 
 Adding a provider means implementing `ProviderPlugin` (see
 `src/providers/plugin.ts`) in `src/providers/<name>/` and adding one entry to `PROVIDER_PLUGINS` in
