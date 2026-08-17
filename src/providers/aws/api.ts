@@ -441,8 +441,8 @@ export async function queryRdsInstance(
 
   const password = options.password
     ? options.password
-    : () =>
-        new Signer({
+    : async () =>
+        await new Signer({
           hostname: host,
           port,
           region,

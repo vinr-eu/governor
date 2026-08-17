@@ -59,7 +59,8 @@ export const sshBastionKeySecret: SecretPlugin = {
       return;
     }
 
-    const passphraseFlag = flags.passphrase;
+    // A bare `--passphrase` (e.g. from `--passphrase $VAR` with $VAR empty) parses as `true` — treat it as an empty passphrase, not an error.
+    const passphraseFlag = flags.passphrase === true ? "" : flags.passphrase;
     if (passphraseFlag !== undefined && typeof passphraseFlag !== "string") {
       logger.error("--passphrase requires a value.");
       process.exitCode = 1;
