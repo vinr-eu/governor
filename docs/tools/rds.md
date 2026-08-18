@@ -3,27 +3,43 @@
 ## `aws_rds_instance_query`
 
 Runs one SQL statement against an RDS instance or Aurora cluster, named the way a human would — by the identifier shown
-in the RDS console (e.g. `"prod-orders-db"`), never by ARN. Reaches it by opening an SSH tunnel through a bastion EC2
-instance already inside that VPC, implemented natively against the `ssh2` library (no `ssh` CLI binary required on the
-machine running `governor serve`).
+in the RDS console (e.g. `"prod-orders-db"`), never by ARN. Reaches it one of two ways:
 
-| Param         | Type   | Required | Description                                                         |
-|---------------|--------|----------|---------------------------------------------------------------------|
-| `name`        | string | yes      | RDS instance or Aurora cluster identifier, e.g. `"prod-orders-db"`. |
-| `bastionName` | string | yes      | `Name` tag of the EC2 bastion to tunnel through.                    |
-| `dbUser`      | string | yes      | Database username.                                                  |
-| `database`    | string | yes      | Name of the database to query.                                      |
-| `sql`         | string | yes      | SQL statement to execute.                                           |
-| `maxRows`     | number | no       | Max rows to return. Default 200, max 1000.                          |
-| `profile`     | string | no       | Profile name. Defaults to `"default"`.                              |
-| `region`      | string | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.         |
+- **`bastionName` given** — opens an SSH tunnel through a bastion EC2 instance already inside that VPC, implemented
+  natively against the `ssh2` library (no `ssh` CLI binary required on the machine running `governor serve`).
+- **`bastionName` omitted** — connects directly to the instance/cluster's own network endpoint. Only works when it's
+  publicly accessible (the `PubliclyAccessible` flag on the instance/cluster); fails with a clear error otherwise
+  rather than hanging.
 
-**Example call:**
+| Param         | Type   | Required | Description                                                                                                 |
+|---------------|--------|----------|---------------------------------------------------------------------------------------------------------------|
+| `name`        | string | yes      | RDS instance or Aurora cluster identifier, e.g. `"prod-orders-db"`.                                        |
+| `bastionName` | string | no       | `Name` tag of the EC2 bastion to tunnel through. Omit to connect directly to a publicly accessible instance/cluster. |
+| `dbUser`      | string | yes      | Database username.                                                                                          |
+| `database`    | string | yes      | Name of the database to query.                                                                              |
+| `sql`         | string | yes      | SQL statement to execute.                                                                                   |
+| `maxRows`     | number | no       | Max rows to return. Default 200, max 1000.                                                                  |
+| `profile`     | string | no       | Profile name. Defaults to `"default"`.                                                                      |
+| `region`      | string | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.                                                 |
+
+**Example call (via bastion):**
 
 ```json
 {
   "name": "governor-db",
   "bastionName": "governor-bastion",
+  "dbUser": "governor_admin",
+  "database": "postgres",
+  "sql": "select 1 as ok",
+  "region": "eu-central-1"
+}
+```
+
+**Example call (direct, publicly accessible instance):**
+
+```json
+{
+  "name": "governor-db",
   "dbUser": "governor_admin",
   "database": "postgres",
   "sql": "select 1 as ok",
@@ -83,10 +99,10 @@ pair — no flag needed on the tool call itself. **Restart `governor serve` afte
 from the vault once at `serve` startup, so a password stored while `serve` is already running isn't picked up until the
 next restart.
 
-### The bastion
+### Reaching the database: bastion tunnel or direct
 
-`bastionName` is resolved by `EC2:DescribeInstances` filtered to `tag:Name = bastionName` and
-`instance-state-name = running`. It must:
+**Via a bastion** (`bastionName` given) — resolved by `EC2:DescribeInstances` filtered to `tag:Name = bastionName` and
+`instance-state-name = running`. The bastion must:
 
 - Have a public IP (governor doesn't assume any other network path — VPN, Direct Connect — is available).
 - Have a unique `Name` tag among running instances — more than one match is a hard error rather than picking one
@@ -102,14 +118,27 @@ The public half of that key must already be in the bastion's `~/.ssh/authorized_
 `aws_key_pair`/`key_name` at instance launch). An empty passphrase is fine — either omit `--passphrase` entirely, or
 pass it as a bare flag (`--passphrase` with no following value); both are treated as "no passphrase," not an error.
 
+Because the SQL client connects to the tunnel's loopback port rather than the RDS endpoint's real hostname, TLS
+hostname/CA verification is skipped for this path — the hop is still encrypted, but what's skipped is confirming which
+host is on the other end, which the already-authenticated SSH tunnel covers instead.
+
+**Direct** (`bastionName` omitted) — governor calls `DescribeDBInstances`/`DescribeDBClusters` to check the
+`PubliclyAccessible` flag before attempting anything. If it's `false`, the call fails immediately with an explicit
+error telling you to pass `bastionName` instead — no connection attempt, no hang. If it's `true`, governor connects
+straight to the instance/cluster's real endpoint hostname, so full TLS verification applies (RDS server certificates
+chain to a publicly trusted root, so this works without extra configuration). This path still requires normal network
+reachability — the RDS instance's security group must allow inbound traffic on the database port from wherever
+`governor serve` runs.
+
 ### Error shapes worth knowing
 
-| Symptom                                                               | Meaning                                                                                            |
-|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `No SSH key stored for bastion "..."`                                 | Run `governor store ssh-key` for that bastion name first.                                          |
-| `No running EC2 instance named "..."`                                 | `bastionName` doesn't match any running instance's `Name` tag in that region.                      |
-| `N running EC2 instances are named "..."`                             | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.                |
-| `Bastion instance "..." has no public IP address`                     | Instance needs a public IP or an Elastic IP attached.                                              |
-| `No RDS instance or Aurora cluster named "..." was found in region X` | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss.    |
-| `... uses engine "...", which isn't supported`                        | Engine isn't Postgres- or MySQL-compatible (see above).                                            |
-| A Postgres/MySQL error (e.g. `password authentication failed`)        | Tunnel and network path are fine — this is a real DB-side rejection (wrong password/user/db name). |
+| Symptom                                                               | Meaning                                                                                             |
+|-------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
+| `No SSH key stored for bastion "..."`                                 | Run `governor store ssh-key` for that bastion name first.                                           |
+| `No running EC2 instance named "..."`                                 | `bastionName` doesn't match any running instance's `Name` tag in that region.                       |
+| `N running EC2 instances are named "..."`                             | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.                 |
+| `Bastion instance "..." has no public IP address`                     | Instance needs a public IP or an Elastic IP attached.                                                |
+| `"..." isn't publicly accessible, so it can't be reached directly`    | `bastionName` was omitted but the instance/cluster's `PubliclyAccessible` flag is `false` — pass `bastionName` instead. |
+| `No RDS instance or Aurora cluster named "..." was found in region X` | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss.     |
+| `... uses engine "...", which isn't supported`                        | Engine isn't Postgres- or MySQL-compatible (see above).                                              |
+| A Postgres/MySQL error (e.g. `password authentication failed`)        | Tunnel/network path (or direct connection) is fine — this is a real DB-side rejection (wrong password/user/db name). |

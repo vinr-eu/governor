@@ -318,7 +318,7 @@ export const awsPlugin: ProviderPlugin<AwsCredential> = {
       {
         title: "Query an RDS database",
         description:
-          'Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. "prod-orders-db") — never by ARN. Reaches it by opening an SSH tunnel through a bastion EC2 instance already inside that VPC — implemented natively against the `ssh2` library, no `ssh` CLI binary required. By default authenticates to the database with a short-lived IAM database-auth token instead of a stored password; if a password was stored for this exact name+dbUser via `governor store rds-password`, that\'s used instead (opt-in, for databases without IAM DB auth turned on). Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) either IAM database authentication turned on with dbUser granted the matching DB role, or a password stored via `governor store rds-password`, (2) a bastion EC2 instance with a public IP, network reachability to the database, a unique Name tag, and an SSH key stored via `governor store ssh-key <bastionName>` whose public half is in the bastion\'s authorized_keys. Results are capped at maxRows; the response\'s `truncated` flag says whether more rows exist.',
+          'Runs one SQL statement against an RDS instance or Aurora cluster, naming it the way a human would — by the identifier shown in the RDS console (e.g. "prod-orders-db") — never by ARN. If `bastionName` is given, reaches it by opening an SSH tunnel through a bastion EC2 instance already inside that VPC — implemented natively against the `ssh2` library, no `ssh` CLI binary required. If `bastionName` is omitted, connects directly to the instance/cluster\'s own endpoint — only works when it\'s publicly accessible, and fails with a clear error otherwise. By default authenticates to the database with a short-lived IAM database-auth token instead of a stored password; if a password was stored for this exact name+dbUser via `governor store rds-password`, that\'s used instead (opt-in, for databases without IAM DB auth turned on). Every name here — name, bastionName, dbUser — is the plain name shown in its console/DB. Requires: (1) either IAM database authentication turned on with dbUser granted the matching DB role, or a password stored via `governor store rds-password`, (2) if using a bastion: a bastion EC2 instance with a public IP, network reachability to the database, a unique Name tag, and an SSH key stored via `governor store ssh-key <bastionName>` whose public half is in the bastion\'s authorized_keys. Results are capped at maxRows; the response\'s `truncated` flag says whether more rows exist.',
         inputSchema: {
           name: z
             .string()
@@ -327,8 +327,9 @@ export const awsPlugin: ProviderPlugin<AwsCredential> = {
             ),
           bastionName: z
             .string()
+            .optional()
             .describe(
-              "Name tag of the EC2 instance to tunnel through — must have a public IP, network access to the RDS instance, a unique Name tag, and a key stored via `governor store ssh-key`.",
+              "Name tag of the EC2 instance to tunnel through — must have a public IP, network access to the RDS instance, a unique Name tag, and a key stored via `governor store ssh-key`. Omit to connect directly to a publicly accessible RDS instance/cluster instead.",
             ),
           dbUser: z
             .string()
@@ -364,17 +365,21 @@ export const awsPlugin: ProviderPlugin<AwsCredential> = {
           const credential = credentials.get(resolvedProfile);
           if (!credential) return notConnected(resolvedProfile);
           const password = credential.rdsPasswords.get(`${name}::${dbUser}`);
-          const sshKey = credential.sshBastionKeys.get(bastionName);
-          if (!sshKey) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `No SSH key stored for bastion "${bastionName}" (profile "${resolvedProfile}"). Run \`governor store ssh-key ${bastionName} --user <ssh-username> --key-file <path>\` first.`,
-                },
-              ],
-            };
+
+          let sshKey: SshBastionKeyCredential | undefined;
+          if (bastionName) {
+            sshKey = credential.sshBastionKeys.get(bastionName);
+            if (!sshKey) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `No SSH key stored for bastion "${bastionName}" (profile "${resolvedProfile}"). Run \`governor store ssh-key ${bastionName} --user <ssh-username> --key-file <path>\` first.`,
+                  },
+                ],
+              };
+            }
           }
 
           try {

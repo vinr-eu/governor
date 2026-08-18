@@ -252,16 +252,18 @@ const MAX_RDS_QUERY_MAX_ROWS = 1000;
 // Every real RDS/Aurora setup reaches the DB by opening a network connection
 // — the Data API's HTTPS-only path only exists for Aurora with it explicitly
 // turned on, and even then still requires a Secrets Manager secret to exist.
-// So this always goes through an SSH tunnel via a bastion EC2 instance
-// already inside the target's VPC, and by default authenticates with a
-// short-lived IAM database-auth token instead of a stored password — no DB
-// secret is persisted by governor unless a password is explicitly opted in
-// via `governor store rds-password`.
+// So this goes either through an SSH tunnel via a bastion EC2 instance
+// already inside the target's VPC (when `bastionName` is given), or directly
+// to the instance/cluster's own endpoint when it's publicly accessible. By
+// default it authenticates with a short-lived IAM database-auth token instead
+// of a stored password — no DB secret is persisted by governor unless a
+// password is explicitly opted in via `governor store rds-password`.
 
 interface RdsEndpointLocation {
   host: string;
   port: number;
   adapter: "postgres" | "mysql";
+  publiclyAccessible: boolean;
 }
 
 function adapterForEngine(engine: string): "postgres" | "mysql" | undefined {
@@ -306,6 +308,7 @@ async function resolveRdsEndpoint(
         host: instance.Endpoint.Address,
         port: instance.Endpoint.Port,
         adapter,
+        publiclyAccessible: instance.PubliclyAccessible ?? false,
       };
     }
   } catch (err) {
@@ -324,7 +327,12 @@ async function resolveRdsEndpoint(
           `Aurora cluster "${name}" uses engine "${cluster.Engine}", which isn't supported — only Postgres- and MySQL-compatible engines are.`,
         );
       }
-      return { host: cluster.Endpoint, port: cluster.Port, adapter };
+      return {
+        host: cluster.Endpoint,
+        port: cluster.Port,
+        adapter,
+        publiclyAccessible: cluster.PubliclyAccessible ?? false,
+      };
     }
   } catch (err) {
     if (!isNotFoundError(err)) throw err;
@@ -389,8 +397,10 @@ function toJsonSafe(value: unknown): unknown {
 }
 
 /**
- * Runs one SQL statement against an RDS instance or Aurora cluster — reached
- * through an SSH tunnel via a bastion EC2 instance already inside its VPC.
+ * Runs one SQL statement against an RDS instance or Aurora cluster. Reached
+ * through an SSH tunnel via a bastion EC2 instance already inside its VPC
+ * when `bastionName` is given; otherwise connects to the instance/cluster's
+ * network endpoint directly, which only works if it's publicly accessible.
  * Defaults to authenticating with a short-lived IAM database-auth token, so
  * no DB secret is persisted; if `options.password` is set (from a vault
  * entry created via `governor store rds-password`), that's used instead — an
@@ -403,14 +413,14 @@ export async function queryRdsInstance(
   credential: AccessKeyCredential,
   options: {
     name: string;
-    bastionName: string;
+    bastionName?: string;
     dbUser: string;
     database: string;
     sql: string;
     region?: string;
     maxRows?: number;
     password?: string;
-    ssh: {
+    ssh?: {
       username: string;
       privateKey: string;
       passphrase?: string;
@@ -424,20 +434,19 @@ export async function queryRdsInstance(
   );
   const region = options.region ?? process.env.AWS_REGION ?? "us-east-1";
 
-  const [{ host, port, adapter }, bastionAddress] = await Promise.all([
-    resolveRdsEndpoint(credential, options.name, region),
-    resolveBastionAddress(credential, options.bastionName, region),
-  ]);
+  const [{ host, port, adapter, publiclyAccessible }, bastionAddress] =
+    await Promise.all([
+      resolveRdsEndpoint(credential, options.name, region),
+      options.bastionName
+        ? resolveBastionAddress(credential, options.bastionName, region)
+        : Promise.resolve(undefined),
+    ]);
 
-  const tunnel = await openSshPortForwardTunnel({
-    host: bastionAddress,
-    port: options.ssh.port,
-    username: options.ssh.username,
-    privateKey: options.ssh.privateKey,
-    passphrase: options.ssh.passphrase,
-    remoteHost: host,
-    remotePort: port,
-  });
+  if (!bastionAddress && !publiclyAccessible) {
+    throw new Error(
+      `"${options.name}" isn't publicly accessible, so it can't be reached directly — pass \`bastionName\` to tunnel through a bastion EC2 instance inside its VPC instead.`,
+    );
+  }
 
   const password = options.password
     ? options.password
@@ -450,19 +459,35 @@ export async function queryRdsInstance(
           credentials: credential,
         }).getAuthToken();
 
-  // The TLS handshake happens over the SSH tunnel to the real RDS endpoint,
-  // but we connect via 127.0.0.1 — the server cert's hostname will never
-  // match that, so hostname/CA verification is skipped below. The hop is
+  const tunnel =
+    bastionAddress && options.ssh
+      ? await openSshPortForwardTunnel({
+          host: bastionAddress,
+          port: options.ssh.port,
+          username: options.ssh.username,
+          privateKey: options.ssh.privateKey,
+          passphrase: options.ssh.passphrase,
+          remoteHost: host,
+          remotePort: port,
+        })
+      : undefined;
+
+  // Tunneled: the TLS handshake happens over the SSH tunnel to the real RDS
+  // endpoint, but we connect via 127.0.0.1 — the server cert's hostname will
+  // never match that, so hostname/CA verification is skipped. The hop is
   // still encrypted; what's skipped is validating who's on the other end,
   // which the already-authenticated SSH tunnel covers.
+  //
+  // Direct: we connect straight to the real endpoint hostname, so full TLS
+  // verification (RDS certs chain to a publicly trusted root) applies.
   const sql = new SQL({
     adapter,
-    hostname: "127.0.0.1",
-    port: tunnel.localPort,
+    hostname: tunnel ? "127.0.0.1" : host,
+    port: tunnel ? tunnel.localPort : port,
     database: options.database,
     username: options.dbUser,
     password,
-    tls: { rejectUnauthorized: false },
+    tls: tunnel ? { rejectUnauthorized: false } : true,
     // One query only ever needs one connection — no reason to pay for a pool.
     max: 1,
   });
@@ -487,7 +512,7 @@ export async function queryRdsInstance(
     return { columns, rows, truncated: records.length > maxRows };
   } finally {
     await sql.close({ timeout: 5 });
-    await tunnel.close();
+    await tunnel?.close();
   }
 }
 
