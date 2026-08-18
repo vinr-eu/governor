@@ -6,7 +6,7 @@ Lists every DynamoDB table visible to a connected profile in a region. Use this 
 describing, querying, or scanning one.
 
 | Param     | Type   | Required | Description                                     |
-|-----------|--------|----------|-------------------------------------------------|
+| --------- | ------ | -------- | ----------------------------------------------- |
 | `profile` | string | no       | Profile name. Defaults to `"default"`.          |
 | `region`  | string | no       | Defaults to `AWS_REGION` env, else `us-east-1`. |
 
@@ -14,11 +14,7 @@ describing, querying, or scanning one.
 
 ```json
 {
-  "tables": [
-    "users",
-    "orders",
-    "orders-dlq"
-  ]
+  "tables": ["users", "orders", "orders-dlq"]
 }
 ```
 
@@ -30,7 +26,7 @@ Returns a table's status, item count, size, primary key schema, and global secon
 table's partition/sort key attribute names before calling `aws_dynamodb_query_table`.
 
 | Param       | Type   | Required | Description        |
-|-------------|--------|----------|--------------------|
+| ----------- | ------ | -------- | ------------------ |
 | `tableName` | string | yes      | Name of the table. |
 | `profile`   | string | no       | Profile name.      |
 | `region`    | string | no       | Region.            |
@@ -71,7 +67,7 @@ Fetches a single item by its exact primary key. Returns `null` (not an error) if
 `aws_dynamodb_describe_table` first if you don't already know the partition/sort key attribute names.
 
 | Param       | Type   | Required | Description                                                                                                                |
-|-------------|--------|----------|----------------------------------------------------------------------------------------------------------------------------|
+| ----------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `tableName` | string | yes      | Name of the table.                                                                                                         |
 | `key`       | object | yes      | Primary key as plain JSON, e.g. `{"userId": "123"}` or `{"userId": "123", "createdAt": "2024-01-01"}` for a composite key. |
 | `profile`   | string | no       | Profile name.                                                                                                              |
@@ -110,7 +106,7 @@ condition), via `keyConditionExpression` using standard DynamoDB expression synt
 use `aws_dynamodb_scan_table` instead when you don't. Paginates internally up to `maxItems`.
 
 | Param                       | Type    | Required | Description                                                                                                  |
-|-----------------------------|---------|----------|--------------------------------------------------------------------------------------------------------------|
+| --------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | `tableName`                 | string  | yes      | Name of the table.                                                                                           |
 | `keyConditionExpression`    | string  | yes      | e.g. `"userId = :uid"` or `"userId = :uid AND createdAt > :since"`.                                          |
 | `scanIndexForward`          | boolean | no       | Sort order on the sort key: `true` (default) ascending, `false` descending.                                  |

@@ -50,7 +50,10 @@ async function resolveElastiCacheEndpoint(
   name: string,
   region: string,
 ): Promise<ElastiCacheEndpointLocation> {
-  const elasticache = new ElastiCacheClient({ region, credentials: credential });
+  const elasticache = new ElastiCacheClient({
+    region,
+    credentials: credential,
+  });
 
   try {
     const result = await elasticache.send(
@@ -84,7 +87,8 @@ async function resolveElastiCacheEndpoint(
     );
     const cluster = result.CacheClusters?.[0];
     if (cluster) {
-      const endpoint = cluster.ConfigurationEndpoint ?? cluster.CacheNodes?.[0]?.Endpoint;
+      const endpoint =
+        cluster.ConfigurationEndpoint ?? cluster.CacheNodes?.[0]?.Endpoint;
       if (endpoint?.Address && endpoint.Port) {
         return {
           host: endpoint.Address,

@@ -17,10 +17,7 @@ Lists the AWS profile names currently connected to this `governor serve` process
 
 ```json
 {
-  "profiles": [
-    "default",
-    "staging"
-  ]
+  "profiles": ["default", "staging"]
 }
 ```
 
@@ -35,7 +32,7 @@ Returns the AWS account id, ARN, and user id for a connected profile by calling 
 confirming which AWS account/identity a profile actually resolves to before trusting its results.
 
 | Param     | Type   | Required | Description                            |
-|-----------|--------|----------|----------------------------------------|
+| --------- | ------ | -------- | -------------------------------------- |
 | `profile` | string | no       | Profile name. Defaults to `"default"`. |
 
 **Example call:**

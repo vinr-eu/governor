@@ -13,14 +13,14 @@ identifier shown in the ElastiCache console (e.g. `"prod-sessions"`), never by A
   `governor serve` itself already has network access to the VPC (or a peered one). An unreachable direct attempt just
   times out with a normal connection error rather than a pre-check like RDS's.
 
-| Param         | Type     | Required | Description                                                                                                       |
-|---------------|----------|----------|---------------------------------------------------------------------------------------------------------------------|
-| `name`        | string   | yes      | Replication group or cache cluster identifier, e.g. `"prod-sessions"`.                                            |
-| `bastionName` | string   | no       | `Name` tag of the EC2 bastion to tunnel through. Omit only if governor already has direct VPC access.             |
-| `command`     | string   | yes      | Redis command name, e.g. `"GET"`, `"HGETALL"`, `"SCAN"`.                                                          |
-| `args`        | string[] | no       | Positional arguments for the command, e.g. `["session:123"]`.                                                     |
-| `profile`     | string   | no       | Profile name. Defaults to `"default"`.                                                                            |
-| `region`      | string   | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.                                                       |
+| Param         | Type     | Required | Description                                                                                           |
+| ------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `name`        | string   | yes      | Replication group or cache cluster identifier, e.g. `"prod-sessions"`.                                |
+| `bastionName` | string   | no       | `Name` tag of the EC2 bastion to tunnel through. Omit only if governor already has direct VPC access. |
+| `command`     | string   | yes      | Redis command name, e.g. `"GET"`, `"HGETALL"`, `"SCAN"`.                                              |
+| `args`        | string[] | no       | Positional arguments for the command, e.g. `["session:123"]`.                                         |
+| `profile`     | string   | no       | Profile name. Defaults to `"default"`.                                                                |
+| `region`      | string   | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.                                           |
 
 **Example call (via bastion):**
 
@@ -119,13 +119,13 @@ the resource's VPC. An unreachable resource just times out with a normal connect
 
 ### Error shapes worth knowing
 
-| Symptom                                                                        | Meaning                                                                                             |
-|---------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| `No SSH key stored for bastion "..."`                                         | Run `governor store ssh-key` for that bastion name first.                                           |
-| `No running EC2 instance named "..."`                                         | `bastionName` doesn't match any running instance's `Name` tag in that region.                       |
-| `N running EC2 instances are named "..."`                                     | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.                 |
-| `Bastion instance "..." has no public IP address`                             | Instance needs a public IP or an Elastic IP attached.                                                |
-| `"..." is a Memcached cluster`                                                | Only Valkey/Redis OSS clusters can be queried — see Supported engines above.                        |
-| `"..." has AuthTokenEnabled`                                                  | Run `governor store redis-auth-token <name>` first, then restart `governor serve`.                  |
-| `No ElastiCache replication group or cache cluster named "..." was found`     | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss.     |
-| A Redis error (e.g. `WRONGTYPE`, `NOAUTH Authentication required`)            | Tunnel/network path (or direct connection) is fine — this is a real cluster-side rejection.          |
+| Symptom                                                                   | Meaning                                                                                         |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `No SSH key stored for bastion "..."`                                     | Run `governor store ssh-key` for that bastion name first.                                       |
+| `No running EC2 instance named "..."`                                     | `bastionName` doesn't match any running instance's `Name` tag in that region.                   |
+| `N running EC2 instances are named "..."`                                 | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.             |
+| `Bastion instance "..." has no public IP address`                         | Instance needs a public IP or an Elastic IP attached.                                           |
+| `"..." is a Memcached cluster`                                            | Only Valkey/Redis OSS clusters can be queried — see Supported engines above.                    |
+| `"..." has AuthTokenEnabled`                                              | Run `governor store redis-auth-token <name>` first, then restart `governor serve`.              |
+| `No ElastiCache replication group or cache cluster named "..." was found` | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss. |
+| A Redis error (e.g. `WRONGTYPE`, `NOAUTH Authentication required`)        | Tunnel/network path (or direct connection) is fine — this is a real cluster-side rejection.     |

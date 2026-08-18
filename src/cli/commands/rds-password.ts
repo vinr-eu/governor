@@ -38,7 +38,8 @@ export async function runRdsPassword(argv: string[]) {
   }
 
   try {
-    const dbPassword = passwordFlag ?? (await promptPassword("Database password:"));
+    const dbPassword =
+      passwordFlag ?? (await promptPassword("Database password:"));
     const masterPassword = await promptPassword("Master password:");
     const vault = await Vault.open(masterPassword);
 

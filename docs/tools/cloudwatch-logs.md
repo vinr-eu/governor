@@ -7,7 +7,7 @@ Lists CloudWatch Logs log groups visible to a profile in a region, with retentio
 `aws_logs_search`.
 
 | Param        | Type   | Required | Description                                                 |
-|--------------|--------|----------|-------------------------------------------------------------|
+| ------------ | ------ | -------- | ----------------------------------------------------------- |
 | `prefix`     | string | no       | Only include log groups whose name starts with this prefix. |
 | `maxResults` | number | no       | Max log groups. Default 200, max 1000.                      |
 | `profile`    | string | no       | Profile name.                                               |
@@ -44,7 +44,7 @@ and incident response. Two modes via `order`:
   considers a bounded number of the most recently active streams.
 
 | Param                 | Type   | Required | Description                                                                                                                    |
-|-----------------------|--------|----------|--------------------------------------------------------------------------------------------------------------------------------|
+| --------------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `logGroupName`        | string | yes      | Exact log group name, e.g. `"/aws/lambda/my-function"`. Use `aws_logs_list_groups` to find it.                                 |
 | `order`               | enum   | no       | `"asc"` (default) or `"desc"` — see above.                                                                                     |
 | `filterPattern`       | string | no       | CloudWatch Logs filter pattern, e.g. `"ERROR"` or `"?ERROR ?WARN"`. Omit to match every event. Only valid with `order: "asc"`. |

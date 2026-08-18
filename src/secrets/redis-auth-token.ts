@@ -41,7 +41,8 @@ export const redisAuthTokenSecret: SecretPlugin = {
     }
 
     try {
-      const authToken = tokenFlag ?? (await promptPassword("Redis AUTH token:"));
+      const authToken =
+        tokenFlag ?? (await promptPassword("Redis AUTH token:"));
       const masterPassword = await promptPassword("Master password:");
       const vault = await Vault.open(masterPassword);
 

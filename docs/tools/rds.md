@@ -11,16 +11,16 @@ in the RDS console (e.g. `"prod-orders-db"`), never by ARN. Reaches it one of tw
   publicly accessible (the `PubliclyAccessible` flag on the instance/cluster); fails with a clear error otherwise
   rather than hanging.
 
-| Param         | Type   | Required | Description                                                                                                 |
-|---------------|--------|----------|---------------------------------------------------------------------------------------------------------------|
-| `name`        | string | yes      | RDS instance or Aurora cluster identifier, e.g. `"prod-orders-db"`.                                        |
+| Param         | Type   | Required | Description                                                                                                          |
+| ------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `name`        | string | yes      | RDS instance or Aurora cluster identifier, e.g. `"prod-orders-db"`.                                                  |
 | `bastionName` | string | no       | `Name` tag of the EC2 bastion to tunnel through. Omit to connect directly to a publicly accessible instance/cluster. |
-| `dbUser`      | string | yes      | Database username.                                                                                          |
-| `database`    | string | yes      | Name of the database to query.                                                                              |
-| `sql`         | string | yes      | SQL statement to execute.                                                                                   |
-| `maxRows`     | number | no       | Max rows to return. Default 200, max 1000.                                                                  |
-| `profile`     | string | no       | Profile name. Defaults to `"default"`.                                                                      |
-| `region`      | string | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.                                                 |
+| `dbUser`      | string | yes      | Database username.                                                                                                   |
+| `database`    | string | yes      | Name of the database to query.                                                                                       |
+| `sql`         | string | yes      | SQL statement to execute.                                                                                            |
+| `maxRows`     | number | no       | Max rows to return. Default 200, max 1000.                                                                           |
+| `profile`     | string | no       | Profile name. Defaults to `"default"`.                                                                               |
+| `region`      | string | no       | AWS region. Defaults to `AWS_REGION` env, else `us-east-1`.                                                          |
 
 **Example call (via bastion):**
 
@@ -51,9 +51,7 @@ in the RDS console (e.g. `"prod-orders-db"`), never by ARN. Reaches it one of tw
 
 ```json
 {
-  "columns": [
-    "ok"
-  ],
+  "columns": ["ok"],
   "rows": [
     {
       "ok": 1
@@ -132,13 +130,13 @@ reachability — the RDS instance's security group must allow inbound traffic on
 
 ### Error shapes worth knowing
 
-| Symptom                                                               | Meaning                                                                                             |
-|-------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| `No SSH key stored for bastion "..."`                                 | Run `governor store ssh-key` for that bastion name first.                                           |
-| `No running EC2 instance named "..."`                                 | `bastionName` doesn't match any running instance's `Name` tag in that region.                       |
-| `N running EC2 instances are named "..."`                             | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.                 |
-| `Bastion instance "..." has no public IP address`                     | Instance needs a public IP or an Elastic IP attached.                                                |
+| Symptom                                                               | Meaning                                                                                                                 |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `No SSH key stored for bastion "..."`                                 | Run `governor store ssh-key` for that bastion name first.                                                               |
+| `No running EC2 instance named "..."`                                 | `bastionName` doesn't match any running instance's `Name` tag in that region.                                           |
+| `N running EC2 instances are named "..."`                             | `Name` tag isn't unique among running instances — fix the tag, don't just pick one.                                     |
+| `Bastion instance "..." has no public IP address`                     | Instance needs a public IP or an Elastic IP attached.                                                                   |
 | `"..." isn't publicly accessible, so it can't be reached directly`    | `bastionName` was omitted but the instance/cluster's `PubliclyAccessible` flag is `false` — pass `bastionName` instead. |
-| `No RDS instance or Aurora cluster named "..." was found in region X` | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss.     |
-| `... uses engine "...", which isn't supported`                        | Engine isn't Postgres- or MySQL-compatible (see above).                                              |
-| A Postgres/MySQL error (e.g. `password authentication failed`)        | Tunnel/network path (or direct connection) is fine — this is a real DB-side rejection (wrong password/user/db name). |
+| `No RDS instance or Aurora cluster named "..." was found in region X` | Wrong `name`, or wrong `region` — the default is `AWS_REGION` env or `us-east-1`, easy to miss.                         |
+| `... uses engine "...", which isn't supported`                        | Engine isn't Postgres- or MySQL-compatible (see above).                                                                 |
+| A Postgres/MySQL error (e.g. `password authentication failed`)        | Tunnel/network path (or direct connection) is fine — this is a real DB-side rejection (wrong password/user/db name).    |

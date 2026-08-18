@@ -1,4 +1,9 @@
-import { listEntryKeys, listProfiles, profileKey, type Vault } from "../cli/lib/vault";
+import {
+  listEntryKeys,
+  listProfiles,
+  profileKey,
+  type Vault,
+} from "../cli/lib/vault";
 
 export const DEFAULT_PROFILE = "default";
 

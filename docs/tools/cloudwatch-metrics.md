@@ -5,12 +5,12 @@
 Discovers which CloudWatch metrics actually exist — namespace, metric name, and dimensions — so you know exactly what to
 pass to `aws_cloudwatch_get_metric_data`. Also doubles as free resource inventory: e.g. namespace `"AWS/ECS"`
 
-+ metricName `"CPUUtilization"` returns every `{ClusterName, ServiceName}` pair currently publishing it;
+- metricName `"CPUUtilization"` returns every `{ClusterName, ServiceName}` pair currently publishing it;
   `"AWS/RDS"` + `"FreeStorageSpace"` returns every `DBInstanceIdentifier`. Narrow with `namespace`/`metricName`/
   `dimensions` (all server-side, cheap) — omitting all of them lists every metric in the account, which can be large.
 
 | Param        | Type   | Required | Description                                                                                       |
-|--------------|--------|----------|---------------------------------------------------------------------------------------------------|
+| ------------ | ------ | -------- | ------------------------------------------------------------------------------------------------- |
 | `namespace`  | string | no       | e.g. `"AWS/RDS"`, `"AWS/ECS"`, `"AWS/Lambda"`.                                                    |
 | `metricName` | string | no       | Exact metric name, e.g. `"CPUUtilization"`.                                                       |
 | `dimensions` | object | no       | Exact dimension values to match, e.g. `{"ClusterName": "prod"}`. All given dimensions must match. |
@@ -54,7 +54,7 @@ instance) rather than calling this once per metric. Each result carries its `nam
 ending now. Use `aws_cloudwatch_list_metrics` first to find the exact dimensions a resource publishes under.
 
 | Param           | Type   | Required | Description                                                                                                                                                                                        |
-|-----------------|--------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| --------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `queries`       | array  | yes      | 1–100 queries, each `{namespace, metricName, dimensions?, stat?}`. `stat` defaults to `"Average"` — also accepts `"Sum"`, `"Maximum"`, `"Minimum"`, `"SampleCount"`, or a percentile like `"p99"`. |
 | `period`        | number | no       | Datapoint granularity in seconds. Default 300 — must be a period CloudWatch supports for the metric's resolution.                                                                                  |
 | `startTime`     | string | no       | ISO 8601. Defaults to 1 hour before `endTime`.                                                                                                                                                     |

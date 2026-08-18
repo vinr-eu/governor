@@ -11,7 +11,7 @@ the per-region SQS quota) before sorting. Narrow with `prefix` to scan a smaller
 `offset`/`limit` then paginate the already-ranked list.
 
 | Param     | Type   | Required | Description                                                      |
-|-----------|--------|----------|------------------------------------------------------------------|
+| --------- | ------ | -------- | ---------------------------------------------------------------- |
 | `prefix`  | string | no       | Only include queues whose name starts with this prefix.          |
 | `offset`  | number | no       | Ranked queues to skip. Default 0.                                |
 | `limit`   | number | no       | Max ranked queues to return. Default 50, max 200.                |
@@ -44,7 +44,7 @@ the per-region SQS quota) before sorting. Narrow with `prefix` to scan a smaller
 ```
 
 `scanIncomplete: true` means the account has more queues than `maxScan` covered — the ranking may be missing some;
-narrow with `prefix` or raise `maxScan`. `truncated: true` just means more *already-ranked* queues exist past this
+narrow with `prefix` or raise `maxScan`. `truncated: true` just means more _already-ranked_ queues exist past this
 page — paginate with `offset`.
 
 ---
@@ -61,7 +61,7 @@ standard (non-FIFO) queues don't guarantee delivery order. Calling this again af
 to surface a different set of messages, which is the closest approximation of pagination SQS supports.
 
 | Param                      | Type   | Required | Description                                                                    |
-|----------------------------|--------|----------|--------------------------------------------------------------------------------|
+| -------------------------- | ------ | -------- | ------------------------------------------------------------------------------ |
 | `queueUrl`                 | string | yes      | Full queue URL, as returned by `aws_sqs_list_queues_by_backlog`.               |
 | `maxMessages`              | number | no       | Max messages. Default 10, max 100.                                             |
 | `visibilityTimeoutSeconds` | number | no       | How long each peeked message is hidden from real consumers. Default 5, max 60. |
