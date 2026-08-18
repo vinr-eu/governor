@@ -1,4 +1,5 @@
 import { rdsPasswordSecret } from "./rds-password";
+import { redisAuthTokenSecret } from "./redis-auth-token";
 import { sshBastionKeySecret } from "./ssh-bastion-key";
 import type { SecretPlugin } from "./plugin";
 
@@ -9,6 +10,7 @@ import type { SecretPlugin } from "./plugin";
  */
 export const SECRET_PLUGINS: SecretPlugin[] = [
   rdsPasswordSecret,
+  redisAuthTokenSecret,
   sshBastionKeySecret,
 ];
 

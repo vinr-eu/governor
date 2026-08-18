@@ -68,6 +68,34 @@ export async function loadRdsPasswords(
   return passwords;
 }
 
+const REDIS_AUTH_TOKEN_PREFIX = "aws-redis-auth-token";
+
+/** Vault key for a stored ElastiCache AUTH token — required whenever the replication group/cluster has `AuthTokenEnabled`. */
+export function redisAuthTokenKey(profile: string, name: string): string {
+  return `${REDIS_AUTH_TOKEN_PREFIX}::${profile}::${name}`;
+}
+
+/**
+ * Every stored Redis AUTH token for one profile, keyed by replication
+ * group/cache cluster name so a tool call can look one up by the same name
+ * the caller already passes. Unlike RDS's per-`dbUser` password, ElastiCache
+ * AUTH is a single token for the whole resource, so there's no second key
+ * component.
+ */
+export async function loadRedisAuthTokens(
+  vault: Vault,
+  profile: string,
+): Promise<Map<string, string>> {
+  const prefix = `${REDIS_AUTH_TOKEN_PREFIX}::${profile}::`;
+  const tokens = new Map<string, string>();
+  for (const key of await listEntryKeys()) {
+    if (!key.startsWith(prefix)) continue;
+    const entry = vault.get<{ token: string }>(key);
+    if (entry) tokens.set(key.slice(prefix.length), entry.token);
+  }
+  return tokens;
+}
+
 export interface SshBastionKeyCredential {
   username: string;
   privateKey: string;

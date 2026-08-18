@@ -5,7 +5,8 @@ parameters, an example call/response, and the gotchas that aren't obvious from t
 
 These are MCP tools, called over `/mcp` (see the main [README](../README.md) for how to point an agent at governor and
 authenticate). All of them are read-only except `aws_rds_instance_query`, which can run arbitrary SQL against a database
-you've explicitly wired up.
+you've explicitly wired up, and `aws_elasticache_redis_command`, which can run arbitrary Redis commands against a
+cluster you've explicitly wired up.
 
 ## AWS (`aws`)
 
@@ -18,6 +19,7 @@ an optional `region`.
 | Identity           | [identity.md](tools/identity.md)                     |
 | S3                 | [s3.md](tools/s3.md)                                 |
 | RDS / Aurora       | [rds.md](tools/rds.md)                               |
+| ElastiCache        | [elasticache.md](tools/elasticache.md)               |
 | DynamoDB           | [dynamodb.md](tools/dynamodb.md)                     |
 | CloudWatch Logs    | [cloudwatch-logs.md](tools/cloudwatch-logs.md)       |
 | CloudWatch Metrics | [cloudwatch-metrics.md](tools/cloudwatch-metrics.md) |

@@ -348,7 +348,7 @@ async function resolveRdsEndpoint(
  * through. Requires the instance to actually have one — governor doesn't
  * assume any other network path (VPN, Direct Connect) is available.
  */
-async function resolveBastionAddress(
+export async function resolveBastionAddress(
   credential: AccessKeyCredential,
   bastionName: string,
   region: string,

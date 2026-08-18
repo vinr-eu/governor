@@ -7,6 +7,7 @@ import {
   DEFAULT_PROFILE,
   loadAccessKeyCredentials,
   loadRdsPasswords,
+  loadRedisAuthTokens,
   loadSshBastionKeys,
   type AccessKeyCredential,
   type SshBastionKeyCredential,
@@ -30,6 +31,7 @@ import {
   searchCloudWatchLogs,
   searchS3Objects,
 } from "./api";
+import { runElastiCacheRedisCommand } from "./elasticache-api";
 
 function notConnected(profile: string): CallToolResult {
   return {
@@ -72,11 +74,14 @@ const regionParam = z
 
 /**
  * AWS credential plus any RDS passwords stored for its profile (keyed by
- * `<dbIdentifier>::<dbUser>`) and any SSH bastion keys stored for it (keyed
- * by bastion name).
+ * `<dbIdentifier>::<dbUser>`), any Redis AUTH tokens stored for it (keyed by
+ * replication group/cache cluster name), and any SSH bastion keys stored for
+ * it (keyed by bastion name — shared across every AWS tool that tunnels
+ * through one, not RDS/ElastiCache-specific).
  */
 interface AwsCredential extends AccessKeyCredential {
   rdsPasswords: Map<string, string>;
+  redisAuthTokens: Map<string, string>;
   sshBastionKeys: Map<string, SshBastionKeyCredential>;
 }
 
@@ -121,6 +126,9 @@ export const awsPlugin: ProviderPlugin<AwsCredential> = {
         ...credential,
         rdsPasswords: vault
           ? await loadRdsPasswords(vault, profile)
+          : new Map(),
+        redisAuthTokens: vault
+          ? await loadRedisAuthTokens(vault, profile)
           : new Map(),
         sshBastionKeys: vault
           ? await loadSshBastionKeys(vault, profile)
@@ -392,6 +400,79 @@ export const awsPlugin: ProviderPlugin<AwsCredential> = {
               region,
               maxRows,
               password,
+              ssh: sshKey,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          } catch (err) {
+            return toErrorResult(err);
+          }
+        },
+      ),
+    );
+
+    server.registerTool(
+      "aws_elasticache_redis_command",
+      {
+        title: "Run a Redis command against an ElastiCache cluster",
+        description:
+          'Runs one Redis command against an ElastiCache replication group or cache cluster, naming it the way the console does — e.g. "prod-sessions" — never by ARN. If `bastionName` is given, reaches it by opening an SSH tunnel through a bastion EC2 instance already inside that VPC (the same mechanism as aws_rds_instance_query — implemented natively against the `ssh2` library, no `ssh` CLI binary required). If `bastionName` is omitted, connects directly to the resource\'s own endpoint — unlike RDS, ElastiCache has no public-endpoint mode at all, so this only works when governor itself is already running inside the VPC (or a peered one); an unreachable direct attempt just times out rather than failing with a pre-check like RDS\'s PubliclyAccessible check. Only Valkey/Redis OSS clusters can be queried — Bun\'s Redis client only speaks the Redis wire protocol, so a Memcached cluster fails with a clear error. `command`/`args` follow the same shape as Bun\'s RedisClient.send(command, args) — e.g. command "GET", args ["session:123"], or command "HGETALL", args ["user:42"]. If the resource has AuthTokenEnabled, a token stored via `governor store redis-auth-token` is required and used automatically. Requires: (1) if using a bastion: a bastion EC2 instance with a public IP, network reachability to the cluster, a unique Name tag, and an SSH key stored via `governor store ssh-key <bastionName>`, (2) if AuthTokenEnabled: a token stored via `governor store redis-auth-token <name>`.',
+        inputSchema: {
+          name: z
+            .string()
+            .describe(
+              'ElastiCache replication group or cache cluster identifier as shown in the console, e.g. "prod-sessions".',
+            ),
+          bastionName: z
+            .string()
+            .optional()
+            .describe(
+              "Name tag of the EC2 instance to tunnel through — must have a public IP, network access to the ElastiCache resource, a unique Name tag, and a key stored via `governor store ssh-key`. Omit only if governor itself already has direct network access to the resource's VPC.",
+            ),
+          command: z
+            .string()
+            .describe('Redis command name, e.g. "GET", "HGETALL", "SCAN".'),
+          args: z
+            .array(z.string())
+            .optional()
+            .describe('Positional arguments for the command, e.g. ["session:123"].'),
+          profile: profileParam,
+          region: regionParam,
+        },
+      },
+      withAudit(
+        "aws_elasticache_redis_command",
+        async ({ name, bastionName, command, args, profile, region }) => {
+          const resolvedProfile = profile ?? DEFAULT_PROFILE;
+          const credential = credentials.get(resolvedProfile);
+          if (!credential) return notConnected(resolvedProfile);
+          const authToken = credential.redisAuthTokens.get(name);
+
+          let sshKey: SshBastionKeyCredential | undefined;
+          if (bastionName) {
+            sshKey = credential.sshBastionKeys.get(bastionName);
+            if (!sshKey) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `No SSH key stored for bastion "${bastionName}" (profile "${resolvedProfile}"). Run \`governor store ssh-key ${bastionName} --user <ssh-username> --key-file <path>\` first.`,
+                  },
+                ],
+              };
+            }
+          }
+
+          try {
+            const result = await runElastiCacheRedisCommand(credential, {
+              name,
+              bastionName,
+              command,
+              args,
+              region,
+              authToken,
               ssh: sshKey,
             });
             return {
