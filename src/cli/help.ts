@@ -29,6 +29,18 @@ Commands:
       --profile <name>                Profile the key is scoped under (default: "default")
       --port <n>                      SSH port on the bastion (default: 22)
       --passphrase <value>            Passphrase for an encrypted private key
+    mongodb-uri <cluster-name>     Connection URI (credentials embedded) for mongodb_query,
+                                      stored under a cluster nickname you choose
+      --profile <name>                Profile the URI is scoped under (default: "default")
+      --uri <value>                   Skip the prompt and pass the URI directly
+    mongodb-bastion-key <bastion>  SSH bastion for mongodb_query's tunnel to a single-host
+                                      "mongodb://" URI (not "mongodb+srv://")
+      --host <address>                Bastion's public IP or hostname (required)
+      --user <name>                   SSH username configured on the bastion (required)
+      --key-file <path>               Path to the private key file (required)
+      --profile <name>                Profile the key is scoped under (default: "default")
+      --port <n>                      SSH port on the bastion (default: 22)
+      --passphrase <value>            Passphrase for an encrypted private key
   rotate-password             Re-encrypt the vault under a new master password
   serve                       Start the MCP endpoint
     --host <addr>                Bind address (default: 127.0.0.1, loopback only)

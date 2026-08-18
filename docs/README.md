@@ -15,7 +15,7 @@ environment if no vault exists). All tools accept an optional `profile` param (d
 an optional `region`.
 
 | Service            | Docs                                                 |
-|--------------------|------------------------------------------------------|
+| ------------------ | ---------------------------------------------------- |
 | Identity           | [identity.md](tools/identity.md)                     |
 | S3                 | [s3.md](tools/s3.md)                                 |
 | RDS / Aurora       | [rds.md](tools/rds.md)                               |
@@ -24,3 +24,12 @@ an optional `region`.
 | CloudWatch Logs    | [cloudwatch-logs.md](tools/cloudwatch-logs.md)       |
 | CloudWatch Metrics | [cloudwatch-metrics.md](tools/cloudwatch-metrics.md) |
 | SQS                | [sqs.md](tools/sqs.md)                               |
+
+## MongoDB (`mongodb`)
+
+Prerequisite: a connection URI stored per cluster via `governor store mongodb-uri <cluster-name>` — no `governor
+setup` step, since (unlike AWS) there's no account-wide credential underneath it. See [mongodb.md](tools/mongodb.md).
+
+| Tool    | Docs                           |
+| ------- | ------------------------------ |
+| MongoDB | [mongodb.md](tools/mongodb.md) |

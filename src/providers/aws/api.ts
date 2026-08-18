@@ -45,7 +45,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import { SQL } from "bun";
 import type { AccessKeyCredential } from "../credentials";
-import { openSshPortForwardTunnel } from "./ssh-tunnel";
+import { openSshPortForwardTunnel } from "../ssh-tunnel";
 
 export interface AwsCallerIdentity {
   account?: string;

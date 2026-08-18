@@ -160,7 +160,8 @@ export async function runServe(args: string[]) {
     logger.info(
       credentials.size > 0
         ? `${plugin.label} credentials loaded for profiles: ${[...credentials.keys()].join(", ")} (held in memory, never exposed to callers).`
-        : `No ${plugin.label} credentials found — run \`governor setup ${plugin.id}\` or set the provider's env vars.`,
+        : (plugin.setupHint ??
+            `No ${plugin.label} credentials found — run \`governor setup ${plugin.id}\` or set the provider's env vars.`),
     );
   }
 

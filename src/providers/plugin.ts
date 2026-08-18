@@ -14,7 +14,16 @@ export type HttpRouteHandler = (
 export interface ProviderPlugin<TCredential = unknown> {
   id: string;
   label: string;
-  authMethod: "access-key" | "api-key";
+  authMethod: "access-key" | "api-key" | "connection-string";
+
+  /**
+   * Overrides the default "run `governor setup <id>`" guidance that `setup`
+   * and `serve` show when this provider isn't configured — for a provider
+   * whose credentials are all managed through `governor store` instead of
+   * `governor setup` (e.g. `mongodb`, one connection string per cluster
+   * rather than one account-wide credential).
+   */
+  setupHint?: string;
 
   /** Resolve this provider's credentials: from `vault` if one is unlocked, otherwise env vars. */
   loadCredentials(vault: Vault | undefined): Promise<Map<string, TCredential>>;

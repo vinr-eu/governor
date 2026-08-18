@@ -38,7 +38,8 @@ export async function runSetup(argv: string[]) {
   }
 
   logger.error(
-    `"${provider.authMethod}" authentication is not implemented yet for ${provider.label}.`,
+    provider.setupHint ??
+      `"${provider.authMethod}" authentication is not implemented yet for ${provider.label}.`,
   );
   process.exitCode = 1;
 }

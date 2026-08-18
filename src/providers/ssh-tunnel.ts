@@ -29,8 +29,8 @@ interface TunnelSocketData {
  * No host-key verification is performed (ssh2 accepts whatever key the
  * bastion presents unless a `hostVerifier` is supplied) — the channel is
  * still encrypted, what's skipped is confirming which host is on the other
- * end, mirroring the same tradeoff already made for the RDS TLS hop in
- * `api.ts`.
+ * end, mirroring the same tradeoff every caller of this tunnel makes on its
+ * own TLS hop (RDS, ElastiCache, MongoDB — see each provider's `api.ts`).
  */
 export async function openSshPortForwardTunnel(options: {
   host: string;

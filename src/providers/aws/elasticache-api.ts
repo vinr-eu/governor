@@ -6,7 +6,7 @@ import {
 import { RedisClient } from "bun";
 import type { AccessKeyCredential } from "../credentials";
 import { resolveBastionAddress } from "./api";
-import { openSshPortForwardTunnel } from "./ssh-tunnel";
+import { openSshPortForwardTunnel } from "../ssh-tunnel";
 
 // Unlike RDS, an ElastiCache replication group/cluster has no
 // `PubliclyAccessible` flag at all — it's VPC-only by design, so in practice
