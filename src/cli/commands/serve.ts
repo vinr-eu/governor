@@ -6,12 +6,21 @@ import {
 } from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  configureApprovalGate,
+  DEFAULT_GATED_TOOLS,
+} from "../../mcp/approval-gate";
 import { createMcpServer } from "../../mcp/server";
 import { PROVIDER_PLUGINS } from "../../providers";
+import { DEFAULT_PROFILE } from "../../providers/credentials";
+import type { SlackCredential } from "../../providers/slack/credentials";
+import { startSlackSocketMode } from "../../providers/slack/socket-mode";
 import { parseFlags } from "../lib/flags";
 import { logger } from "../lib/logger";
 import { promptPassword } from "../lib/prompt";
 import { Vault, vaultExists } from "../lib/vault";
+
+const DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300;
 
 const mcpTransports = new Map<
   string,
@@ -163,6 +172,80 @@ export async function runServe(args: string[]) {
         : (plugin.setupHint ??
             `No ${plugin.label} credentials found — run \`governor setup ${plugin.id}\` or set the provider's env vars.`),
     );
+  }
+
+  // Which tools are gated defaults to DEFAULT_GATED_TOOLS (active
+  // automatically once Slack is configured, no flag needed) — passing
+  // --require-approval overrides that default list outright, and
+  // --require-approval "" disables gating even if Slack is configured.
+  const requireApprovalFlag = flags["require-approval"];
+  if (
+    requireApprovalFlag !== undefined &&
+    typeof requireApprovalFlag !== "string"
+  ) {
+    logger.error(
+      '--require-approval requires a comma-separated tool list (or "" to disable).',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const requireApprovalGiven = requireApprovalFlag !== undefined;
+  const gatedTools = requireApprovalGiven
+    ? new Set(
+        requireApprovalFlag
+          .split(",")
+          .map((name) => name.trim())
+          .filter(Boolean),
+      )
+    : new Set(DEFAULT_GATED_TOOLS);
+
+  if (gatedTools.size > 0) {
+    const slackCredentials = (credentialsByProvider.get("slack") ??
+      new Map()) as Map<string, SlackCredential>;
+    const slackCredential =
+      slackCredentials.get(DEFAULT_PROFILE) ??
+      slackCredentials.values().next().value;
+
+    if (!slackCredential) {
+      if (requireApprovalGiven) {
+        logger.error(
+          `--require-approval was given (${[...gatedTools].join(", ")}) but no Slack credentials are configured. Run \`governor store slack-credential\` first.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      logger.info(
+        `${[...gatedTools].join(", ")} would require Slack approval by default, but no Slack credentials are configured — running ungated. Run \`governor store slack-credential\` to enable, or pass --require-approval "" to silence this.`,
+      );
+    } else {
+      const approvalTimeoutFlag = flags["approval-timeout-seconds"];
+      if (
+        approvalTimeoutFlag !== undefined &&
+        typeof approvalTimeoutFlag !== "string"
+      ) {
+        logger.error("--approval-timeout-seconds requires a value.");
+        process.exitCode = 1;
+        return;
+      }
+      const timeoutSeconds = approvalTimeoutFlag
+        ? Number(approvalTimeoutFlag)
+        : DEFAULT_APPROVAL_TIMEOUT_SECONDS;
+      if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+        logger.error("--approval-timeout-seconds must be a positive number.");
+        process.exitCode = 1;
+        return;
+      }
+
+      configureApprovalGate({
+        credential: slackCredential,
+        gatedTools,
+        timeoutSeconds,
+      });
+      startSlackSocketMode(slackCredential);
+      logger.warn(
+        `Approval required via Slack (channel ${slackCredential.channel}, ${timeoutSeconds}s timeout) before: ${[...gatedTools].join(", ")}.`,
+      );
+    }
   }
 
   const mcpToken =

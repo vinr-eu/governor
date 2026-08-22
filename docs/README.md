@@ -6,7 +6,9 @@ parameters, an example call/response, and the gotchas that aren't obvious from t
 These are MCP tools, called over `/mcp` (see the main [README](../README.md) for how to point an agent at governor and
 authenticate). All of them are read-only except `aws_rds_instance_query`, which can run arbitrary SQL against a database
 you've explicitly wired up, and `aws_elasticache_redis_command`, which can run arbitrary Redis commands against a
-cluster you've explicitly wired up.
+cluster you've explicitly wired up. Once Slack is configured, `aws_rds_instance_query`, `aws_elasticache_redis_command`,
+and `aws_s3_list_buckets` all require a human Slack approval before they run, automatically — see
+[Slack](#slack-slack--not-an-mcp-tool) below.
 
 ## AWS (`aws`)
 
@@ -33,3 +35,10 @@ setup` step, since (unlike AWS) there's no account-wide credential underneath it
 | Tool    | Docs                           |
 | ------- | ------------------------------ |
 | MongoDB | [mongodb.md](tools/mongodb.md) |
+
+## Slack (`slack`) — not an MCP tool
+
+Slack backs governor's own approval gate — not an agent-facing MCP tool, an agent never talks to Slack directly.
+Once configured, `aws_rds_instance_query`, `aws_elasticache_redis_command`, and `aws_s3_list_buckets` require a human
+Approve/Deny click automatically, no flag needed; `governor serve --require-approval <tool>,...` overrides that
+default list with any tool from any provider. See [slack.md](tools/slack.md) for the full setup.

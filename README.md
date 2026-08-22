@@ -93,13 +93,13 @@ bun run build          # -> ./dist/governor
 
 ## CLI reference
 
-| Command                        | Description                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `governor init`                | Create the encrypted vault and set the master password.                                                                                                                                                                                                                                                                                                                                                                 |
-| `governor setup <provider>`    | Store credentials for a provider. `--profile <name>` to use a named profile (default `"default"`); `--list` to list configured profiles.                                                                                                                                                                                                                                                                                |
-| `governor store <secret-type>` | Store an auxiliary secret a tool opts into, e.g. `governor store ssh-key <bastionName> --user <name> --key-file <path>`, `governor store rds-password <name> <dbUser>`, `governor store redis-auth-token <name>`, or `governor store mongodb-uri <cluster-name>`. See [docs/tools/rds.md](docs/tools/rds.md) / [docs/tools/elasticache.md](docs/tools/elasticache.md) / [docs/tools/mongodb.md](docs/tools/mongodb.md). |
-| `governor rotate-password`     | Re-encrypt the vault under a new master password — the standard remediation if the old one may be compromised. Also upgrades the vault's KDF params to current.                                                                                                                                                                                                                                                         |
-| `governor serve`               | Start the MCP endpoint. `--host` (default `127.0.0.1`), `--port` (default `8787`).                                                                                                                                                                                                                                                                                                                                      |
+| Command                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `governor init`                | Create the encrypted vault and set the master password.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `governor setup <provider>`    | Store credentials for a provider. `--profile <name>` to use a named profile (default `"default"`); `--list` to list configured profiles.                                                                                                                                                                                                                                                                                                                                                                |
+| `governor store <secret-type>` | Store an auxiliary secret a tool opts into, e.g. `governor store ssh-key <bastionName> --user <name> --key-file <path>`, `governor store rds-password <name> <dbUser>`, `governor store redis-auth-token <name>`, `governor store mongodb-uri <cluster-name>`, or `governor store slack-credential`. See [docs/tools/rds.md](docs/tools/rds.md) / [docs/tools/elasticache.md](docs/tools/elasticache.md) / [docs/tools/mongodb.md](docs/tools/mongodb.md) / [docs/tools/slack.md](docs/tools/slack.md). |
+| `governor rotate-password`     | Re-encrypt the vault under a new master password — the standard remediation if the old one may be compromised. Also upgrades the vault's KDF params to current.                                                                                                                                                                                                                                                                                                                                         |
+| `governor serve`               | Start the MCP endpoint. `--host` (default `127.0.0.1`), `--port` (default `8787`). `--require-approval <tool>,...` overrides the default Slack-approval-gated tool list (see [docs/tools/slack.md](docs/tools/slack.md)); `--approval-timeout-seconds` (default `300`).                                                                                                                                                                                                                                 |
 
 `serve` reads its bearer token from `GOVERNOR_MCP_TOKEN` if set, otherwise generates one and prints it once at startup.
 In non-interactive contexts (no TTY — CI, cron), the vault password comes from `GOVERNOR_MASTER_PASSWORD`
@@ -164,6 +164,29 @@ MCP tools:
 
 See [docs/tools/mongodb.md](docs/tools/mongodb.md) for exact parameters, example calls/responses, and error shapes.
 
+### Slack (`slack`) — not an MCP tool, governor's own approval gate
+
+Unlike every other provider, Slack exposes **no MCP tools** — an agent never talks to it directly. Instead, once
+`governor store slack-credential` has been run, `aws_rds_instance_query`, `aws_elasticache_redis_command`, and
+`aws_s3_list_buckets` automatically require a human to click Approve/Deny in a Slack channel before they run — no
+flag needed. This is deliberately _not_ something the agent can request or opt out of. The gate is applied centrally
+at tool-registration time (`src/mcp/server.ts`), not inside each tool's own code, so gating a tool is purely a name
+in a list — `--require-approval <tool>,...` replaces the default list outright with any tools from any provider, and
+`--require-approval ""` disables gating even with Slack configured.
+
+Auth: a bot token + app-level token + a default approval channel from one Slack app, stored together via `governor
+store slack-credential`. There's no `governor setup slack` step, same reasoning as MongoDB — no account-wide
+credential to set up beyond that trio.
+
+Governor connects via **Socket Mode** — an outbound WebSocket governor itself opens to receive button clicks, not an
+inbound webhook. Nothing needs to be exposed to the internet: no public route, no `--host` widening, no reverse
+proxy or tunnel. This is the one Slack integration style that keeps governor's outbound-only shape intact.
+
+Slack exposes no REST routes either — the Socket Mode connection replaces what would otherwise have been a
+webhook route.
+
+See [docs/tools/slack.md](docs/tools/slack.md) for the full setup, exactly what a gated call looks like, and error shapes.
+
 Adding a provider means implementing `ProviderPlugin` (see
 `src/providers/plugin.ts`) in `src/providers/<name>/` and adding one entry to `PROVIDER_PLUGINS` in
 `src/providers/index.ts` — `serve`, the MCP server, and `setup` all work generically off that list.
@@ -175,6 +198,9 @@ Adding a provider means implementing `ProviderPlugin` (see
   reachable from the network by default.
 - `/mcp` and every `/providers/*` route require
   `Authorization: Bearer <token>`; failed attempts are logged (path and method only — never the attempted token).
+  There are no exceptions — Slack approval clicks arrive over an outbound Socket Mode connection governor opens
+  itself, never an inbound request, so there's no route that needs to skip the bearer check. See
+  [docs/tools/slack.md](docs/tools/slack.md).
 - Presigned URLs are capped at 1 hour and default to 5 minutes.
 - See [`CLAUDE.md`](CLAUDE.md) for the full set of conventions and the reasoning behind the vault's crypto design.
 
@@ -190,7 +216,7 @@ bun run format             # prettier --write .
 ## Roadmap
 
 - One-shot `audit` / `check` commands for scripted, non-interactive posture checks.
-- Additional providers beyond AWS and MongoDB.
+- Additional providers beyond AWS, MongoDB, and Slack.
 
 ## License
 

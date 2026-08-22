@@ -2,6 +2,7 @@ import { mongodbBastionSecret } from "./mongodb-bastion";
 import { mongodbUriSecret } from "./mongodb-uri";
 import { rdsPasswordSecret } from "./rds-password";
 import { redisAuthTokenSecret } from "./redis-auth-token";
+import { slackCredentialSecret } from "./slack-credential";
 import { sshBastionKeySecret } from "./ssh-bastion-key";
 import type { SecretPlugin } from "./plugin";
 
@@ -16,6 +17,7 @@ export const SECRET_PLUGINS: SecretPlugin[] = [
   sshBastionKeySecret,
   mongodbUriSecret,
   mongodbBastionSecret,
+  slackCredentialSecret,
 ];
 
 export function findSecretPlugin(id: string): SecretPlugin | undefined {

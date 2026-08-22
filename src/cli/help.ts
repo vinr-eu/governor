@@ -41,14 +41,31 @@ Commands:
       --profile <name>                Profile the key is scoped under (default: "default")
       --port <n>                      SSH port on the bastion (default: 22)
       --passphrase <value>            Passphrase for an encrypted private key
+    slack-credential                Bot token + app-level token + approval channel for
+                                       governor's own Slack approval gate (see serve below)
+      --channel <id>                   Channel to post approval requests to (required)
+      --profile <name>                Profile the credential is scoped under (default: "default")
+      --bot-token <value>              Skip the prompt and pass the bot token directly (xoxb-...)
+      --app-token <value>              Skip the prompt and pass the app-level token directly (xapp-...)
   rotate-password             Re-encrypt the vault under a new master password
   serve                       Start the MCP endpoint
     --host <addr>                Bind address (default: 127.0.0.1, loopback only)
     --port <port>                Port to listen on (default: 8787)
+    Once governor store slack-credential has been run, aws_rds_instance_query,
+    aws_elasticache_redis_command, and aws_s3_list_buckets require a human to
+    click Approve/Deny in Slack before they run — on by default, no flag
+    needed. Governor itself enforces this; the agent can't see or skip it.
+    --require-approval <tool>,...  Override the default gated-tool list outright
+                                      (not additively) with this comma-separated list.
+                                      Pass "" to disable gating even if Slack is configured.
+    --approval-timeout-seconds <n>  How long to wait for a decision before treating a gated
+                                       call as denied (default: 300)
     --profile is available per-request via /providers/aws/:profile/identity
     Requires "Authorization: Bearer <token>" on /mcp and /providers/*.
     Token comes from GOVERNOR_MCP_TOKEN, or is generated fresh each run
-    and printed once at startup.
+    and printed once at startup. No exceptions — Slack approval clicks
+    arrive over an outbound Socket Mode connection governor opens itself,
+    not an inbound webhook, so nothing needs to be exposed publicly.
 
 Options:
   -h, --help                  Show this help message
